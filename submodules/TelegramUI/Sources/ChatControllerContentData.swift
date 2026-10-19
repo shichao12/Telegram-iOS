@@ -114,6 +114,7 @@ extension ChatControllerImpl {
             var copyProtectionEnabled: Bool = false
             var myCopyProtectionEnabled: Bool = false
             var sendPaidMessageStars: StarsAmount?
+            var gramAddress: String?
             var alwaysShowGiftButton: Bool = false
             var disallowedGifts: TelegramDisallowedGifts?
             var appliedBoosts: Int32?
@@ -701,20 +702,27 @@ extension ChatControllerImpl {
                 
                 let globalPrivacySettings = context.engine.data.get(TelegramEngine.EngineData.Item.Configuration.GlobalPrivacy())
                 
-                let canStopIncomingStreamingMessage: Signal<Bool, NoError> = .single(false)
-                /*if let peerId = chatLocation.peerId {
+                // Presence of a draft is not the condition: a draft without can_stop, and one
+                // already stopped with keep_on_stop, must both leave the button hidden.
+                let canStopIncomingStreamingMessage: Signal<Bool, NoError>
+                if let peerId = chatLocation.peerId {
                     let key = PeerAndThreadId(peerId: peerId, threadId: chatLocation.threadId)
                     canStopIncomingStreamingMessage = context.account.postbox.combinedView(keys: [PostboxViewKey.typingDrafts(key)])
                     |> map { views -> Bool in
-                        guard let view = views.views[PostboxViewKey.typingDrafts(key)] as? TypingDraftsView else {
+                        guard let view = views.views[PostboxViewKey.typingDrafts(key)] as? TypingDraftsView, let typingDraft = view.typingDraft else {
                             return false
                         }
-                        return view.typingDraft != nil
+                        for attribute in typingDraft.attributes {
+                            if let attribute = attribute as? TypingDraftMessageAttribute {
+                                return attribute.canStop
+                            }
+                        }
+                        return false
                     }
                     |> distinctUntilChanged
                 } else {
                     canStopIncomingStreamingMessage = .single(false)
-                }*/
+                }
 
                 self.peerDisposable = combineLatest(
                     queue: Queue.mainQueue(),
@@ -852,12 +860,14 @@ extension ChatControllerImpl {
                     var contactStatus: ChatContactStatus?
                     var businessIntro: TelegramBusinessIntro?
                     var sendPaidMessageStars: StarsAmount?
+                    var gramAddress: String?
                     var alwaysShowGiftButton = false
                     var disallowedGifts: TelegramDisallowedGifts?
                     var isManagedBot = false
                     if let peer = peerView.peers[peerView.peerId] {
                         if let cachedData = peerView.cachedData as? CachedUserData {
                             isManagedBot = cachedData.botManagerId != nil
+                            gramAddress = cachedData.gramAddress
                             contactStatus = ChatContactStatus(canAddContact: !peerView.peerIsContact, peerStatusSettings: cachedData.peerStatusSettings, invitedBy: nil, managingBot: managingBot)
                             if case let .known(value) = cachedData.businessIntro {
                                 businessIntro = value
@@ -1075,6 +1085,7 @@ extension ChatControllerImpl {
                     strongSelf.state.hasSearchTags = hasSearchTags
                     strongSelf.state.isPremiumRequiredForMessaging = isPremiumRequiredForMessaging
                     strongSelf.state.sendPaidMessageStars = sendPaidMessageStars
+                    strongSelf.state.gramAddress = gramAddress
                     strongSelf.state.alwaysShowGiftButton = alwaysShowGiftButton
                     strongSelf.state.disallowedGifts = disallowedGifts
                     strongSelf.state.hasSavedChats = hasSavedChats
@@ -1398,20 +1409,27 @@ extension ChatControllerImpl {
                 
                 let globalPrivacySettings = context.engine.data.get(TelegramEngine.EngineData.Item.Configuration.GlobalPrivacy())
                 
-                let canStopIncomingStreamingMessage: Signal<Bool, NoError> = .single(false)
-                /*if let peerId = chatLocation.peerId {
+                // Presence of a draft is not the condition: a draft without can_stop, and one
+                // already stopped with keep_on_stop, must both leave the button hidden.
+                let canStopIncomingStreamingMessage: Signal<Bool, NoError>
+                if let peerId = chatLocation.peerId {
                     let key = PeerAndThreadId(peerId: peerId, threadId: chatLocation.threadId)
                     canStopIncomingStreamingMessage = context.account.postbox.combinedView(keys: [PostboxViewKey.typingDrafts(key)])
                     |> map { views -> Bool in
-                        guard let view = views.views[PostboxViewKey.typingDrafts(key)] as? TypingDraftsView else {
+                        guard let view = views.views[PostboxViewKey.typingDrafts(key)] as? TypingDraftsView, let typingDraft = view.typingDraft else {
                             return false
                         }
-                        return view.typingDraft != nil
+                        for attribute in typingDraft.attributes {
+                            if let attribute = attribute as? TypingDraftMessageAttribute {
+                                return attribute.canStop
+                            }
+                        }
+                        return false
                     }
                     |> distinctUntilChanged
                 } else {
                     canStopIncomingStreamingMessage = .single(false)
-                }*/
+                }
                 
                 self.peerDisposable = (combineLatest(queue: Queue.mainQueue(),
                     peerView,
@@ -1446,6 +1464,7 @@ extension ChatControllerImpl {
                     var copyProtectionEnabled = false
                     var businessIntro: TelegramBusinessIntro?
                     var sendPaidMessageStars: StarsAmount?
+                    var gramAddress: String?
                     var alwaysShowGiftButton = false
                     var disallowedGifts: TelegramDisallowedGifts?
                     var isManagedBot = false
@@ -1453,6 +1472,7 @@ extension ChatControllerImpl {
                         copyProtectionEnabled = peer.isCopyProtectionEnabled
                         if let cachedData = peerView.cachedData as? CachedUserData {
                             isManagedBot = cachedData.botManagerId != nil
+                            gramAddress = cachedData.gramAddress
                             contactStatus = ChatContactStatus(canAddContact: !peerView.peerIsContact, peerStatusSettings: cachedData.peerStatusSettings, invitedBy: nil, managingBot: managingBot)
                             if case let .known(value) = cachedData.businessIntro {
                                 businessIntro = value
@@ -1783,6 +1803,7 @@ extension ChatControllerImpl {
                         strongSelf.state.boostsToUnrestrict = boostsToUnrestrict
                         strongSelf.state.businessIntro = businessIntro
                         strongSelf.state.sendPaidMessageStars = sendPaidMessageStars
+                        strongSelf.state.gramAddress = gramAddress
                         strongSelf.state.alwaysShowGiftButton = alwaysShowGiftButton
                         strongSelf.state.disallowedGifts = disallowedGifts
                         
@@ -1856,6 +1877,8 @@ extension ChatControllerImpl {
                         }
                         
                         self.state.chatTitleContent = .custom(title: [ChatTitleContent.TitleTextItem(id: AnyHashable(0), content: .text(link.title ?? strings.Business_Links_EditLinkTitle))], subtitle: linkUrl, isEnabled: false)
+                    case .welcomeMessages:
+                        self.state.chatTitleContent = .custom(title: [ChatTitleContent.TitleTextItem(id: AnyHashable(0), content: .text(strings.WelcomeMessages_Title))], subtitle: nil, isEnabled: false)
                     }
                 } else {
                     self.state.chatTitleContent = .custom(title: [ChatTitleContent.TitleTextItem(id: AnyHashable(0), content: .text(" "))], subtitle: nil, isEnabled: false)
@@ -2221,7 +2244,7 @@ extension ChatControllerImpl {
                 
                 let premiumGiftOptions: Signal<[CachedPremiumGiftOption], NoError> = .single([])
                 |> then(
-                    context.engine.payments.premiumGiftCodeOptions(peerId: peerId, onlyCached: true)
+                    context.engine.payments.premiumGiftCodeOptions(peerId: nil, onlyCached: true)
                     |> map { options in
                         return options.filter { $0.users == 1 }.map { CachedPremiumGiftOption(months: $0.months, currency: $0.currency, amount: $0.amount, botUrl: "", storeProductId: $0.storeProductId) }
                     }

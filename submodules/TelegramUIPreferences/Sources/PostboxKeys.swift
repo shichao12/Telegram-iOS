@@ -11,6 +11,8 @@ private enum ApplicationSpecificPreferencesKeyValues: Int32 {
     case textProcessingEditingState = 22
     case messageKeywordBlacklistSettings = 23
     case sharePinnedPeersSettings = 24
+    // Keep existing fork preference IDs stable; use a separate ID for the new wallet state.
+    case walletState = 10000
 }
 
 public struct ApplicationSpecificPreferencesKeys {
@@ -22,6 +24,7 @@ public struct ApplicationSpecificPreferencesKeys {
     public static let ageVerificationState: EngineDataBuffer = applicationSpecificPreferencesKey(ApplicationSpecificPreferencesKeyValues.ageVerificationState.rawValue)
     public static let messageKeywordBlacklistSettings: EngineDataBuffer = applicationSpecificPreferencesKey(ApplicationSpecificPreferencesKeyValues.messageKeywordBlacklistSettings.rawValue)
     public static let sharePinnedPeersSettings: EngineDataBuffer = applicationSpecificPreferencesKey(ApplicationSpecificPreferencesKeyValues.sharePinnedPeersSettings.rawValue)
+    public static let walletState: EngineDataBuffer = applicationSpecificPreferencesKey(ApplicationSpecificPreferencesKeyValues.walletState.rawValue)
     
     public static func textProcessingEditingState(peerId: EnginePeer.Id) -> EngineDataBuffer {
         let key = EngineDataBuffer(length: 4 + 8)
