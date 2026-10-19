@@ -20,6 +20,94 @@ public enum ExportAuthTransferTokenResult {
     case passwordRequested(UnauthorizedAccount)
 }
 
+public enum ImportAuthTransferTokenError {
+    case generic
+    case invalid
+    case expired
+    case alreadyAccepted
+}
+
+public enum ImportAuthTransferTokenResult {
+    case loggedIn
+    case passwordRequested
+}
+
+/// Imports a login token scanned from a desktop session while the app is still
+/// unauthorised. This is the flow used by the login screen's QR scanner.
+public func importAuthTransferToken(accountManager: AccountManager<TelegramAccountManagerTypes>, account: UnauthorizedAccount, token: Data, syncContacts: Bool) -> Signal<ImportAuthTransferTokenResult, ImportAuthTransferTokenError> {
+    func importToken(_ account: UnauthorizedAccount, token: Buffer) -> Signal<ImportAuthTransferTokenResult, ImportAuthTransferTokenError> {
+        return account.network.request(Api.functions.auth.importLoginToken(token: token))
+        |> map(Optional.init)
+        |> `catch` { error -> Signal<Api.auth.LoginToken?, ImportAuthTransferTokenError> in
+            if error.errorDescription == "SESSION_PASSWORD_NEEDED" {
+                return account.network.request(Api.functions.account.getPassword(), automaticFloodWait: false)
+                |> mapError { _ in ImportAuthTransferTokenError.generic }
+                |> mapToSignal { result -> Signal<Api.auth.LoginToken?, ImportAuthTransferTokenError> in
+                    switch result {
+                    case let .password(passwordData):
+                        return account.postbox.transaction { transaction -> Api.auth.LoginToken? in
+                            transaction.setState(UnauthorizedAccountState(isTestingEnvironment: account.testingEnvironment, masterDatacenterId: account.masterDatacenterId, contents: .passwordEntry(hint: passwordData.hint ?? "", number: nil, code: nil, suggestReset: false, syncContacts: syncContacts)))
+                            return nil
+                        }
+                        |> castError(ImportAuthTransferTokenError.self)
+                    }
+                }
+            } else {
+                switch error.errorDescription {
+                case "AUTH_TOKEN_INVALID":
+                    return .fail(.invalid)
+                case "AUTH_TOKEN_EXPIRED":
+                    return .fail(.expired)
+                case "AUTH_TOKEN_ALREADY_ACCEPTED":
+                    return .fail(.alreadyAccepted)
+                default:
+                    return .fail(.generic)
+                }
+            }
+        }
+        |> mapToSignal { result -> Signal<ImportAuthTransferTokenResult, ImportAuthTransferTokenError> in
+            guard let result else {
+                return .single(.passwordRequested)
+            }
+            switch result {
+            case let .loginTokenMigrateTo(loginTokenMigrateToData):
+                let updatedAccount = account.changedMasterDatacenterId(accountManager: accountManager, masterDatacenterId: loginTokenMigrateToData.dcId)
+                return updatedAccount
+                |> castError(ImportAuthTransferTokenError.self)
+                |> mapToSignal { updatedAccount in
+                    return importToken(updatedAccount, token: loginTokenMigrateToData.token)
+                }
+            case let .loginTokenSuccess(loginTokenSuccessData):
+                switch loginTokenSuccessData.authorization {
+                case let .authorization(authorizationData):
+                    if let futureAuthToken = authorizationData.futureAuthToken {
+                        storeFutureLoginToken(accountManager: accountManager, token: futureAuthToken.makeData())
+                    }
+                    return account.postbox.transaction { transaction -> Signal<ImportAuthTransferTokenResult, ImportAuthTransferTokenError> in
+                        let user = TelegramUser(user: authorizationData.user)
+                        let state = AuthorizedAccountState(isTestingEnvironment: account.testingEnvironment, masterDatacenterId: account.masterDatacenterId, peerId: user.id, state: nil, invalidatedChannels: [])
+                        initializedAppSettingsAfterLogin(transaction: transaction, appVersion: account.networkArguments.appVersion, syncContacts: syncContacts)
+                        transaction.setState(state)
+                        return accountManager.transaction { transaction -> ImportAuthTransferTokenResult in
+                            switchToAuthorizedAccount(transaction: transaction, account: account, isSupportUser: false)
+                            return .loggedIn
+                        }
+                        |> castError(ImportAuthTransferTokenError.self)
+                    }
+                    |> castError(ImportAuthTransferTokenError.self)
+                    |> switchToLatest
+                case .authorizationSignUpRequired:
+                    return .fail(.generic)
+                }
+            case .loginToken:
+                return .fail(.generic)
+            }
+        }
+    }
+
+    return importToken(account, token: Buffer(data: token))
+}
+
 func _internal_exportAuthTransferToken(accountManager: AccountManager<TelegramAccountManagerTypes>, account: UnauthorizedAccount, otherAccountUserIds: [PeerId.Id], syncContacts: Bool) -> Signal<ExportAuthTransferTokenResult, ExportAuthTransferTokenError> {
     return account.network.request(Api.functions.auth.exportLoginToken(apiId: account.networkArguments.apiId, apiHash: account.networkArguments.apiHash, exceptIds: otherAccountUserIds.map({ $0._internalGetInt64Value() })))
     |> map(Optional.init)

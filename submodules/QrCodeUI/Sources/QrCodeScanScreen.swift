@@ -48,12 +48,14 @@ private func parseAuthTransferUrl(_ url: URL) -> Data? {
 public final class QrCodeScanScreen: ViewController {
     public enum Subject {
         case authTransfer(activeSessionsContext: ActiveSessionsContext)
+        case authTransferUnauthorized(accountManager: AccountManager<TelegramAccountManagerTypes>, account: UnauthorizedAccount, syncContacts: Bool)
         case peer
         case cryptoAddress
         case custom(info: String)
     }
     
-    private let context: AccountContext
+    private let context: AccountContext?
+    private let sharedContext: SharedAccountContext
     private let subject: QrCodeScanScreen.Subject
     private var presentationData: PresentationData
     
@@ -75,6 +77,7 @@ public final class QrCodeScanScreen: ViewController {
     
     public init(context: AccountContext, subject: QrCodeScanScreen.Subject) {
         self.context = context
+        self.sharedContext = context.sharedContext
         self.subject = subject
         
         self.presentationData = context.sharedContext.currentPresentationData.with { $0 }
@@ -88,6 +91,29 @@ public final class QrCodeScanScreen: ViewController {
         self.navigationBar?.intrinsicCanTransitionInline = false
 
         self.inForegroundDisposable = (context.sharedContext.applicationBindings.applicationInForeground
+        |> deliverOnMainQueue).start(next: { [weak self] inForeground in
+            guard let strongSelf = self else {
+                return
+            }
+            (strongSelf.displayNode as! QrCodeScanScreenNode).updateInForeground(inForeground)
+        })
+    }
+
+    public init(sharedContext: SharedAccountContext, account: UnauthorizedAccount, subject: QrCodeScanScreen.Subject) {
+        self.context = nil
+        self.sharedContext = sharedContext
+        self.subject = subject
+
+        self.presentationData = sharedContext.currentPresentationData.with { $0 }
+
+        super.init(navigationBarPresentationData: nil)
+
+        self.statusBar.statusBarStyle = .White
+        self.navigationPresentation = .modalInLargeLayout
+        self.supportedOrientations = ViewControllerSupportedOrientations(regularSize: .all, compactSize: .portrait)
+        self.navigationBar?.intrinsicCanTransitionInline = false
+
+        self.inForegroundDisposable = (sharedContext.applicationBindings.applicationInForeground
         |> deliverOnMainQueue).start(next: { [weak self] inForeground in
             guard let strongSelf = self else {
                 return
@@ -145,7 +171,9 @@ public final class QrCodeScanScreen: ViewController {
                 }
                 return true
             }
-            viewControllers.append(self.context.sharedContext.makeRecentSessionsController(context: self.context, activeSessionsContext: activeSessionsContext))
+            if let context = self.context {
+                viewControllers.append(context.sharedContext.makeRecentSessionsController(context: context, activeSessionsContext: activeSessionsContext))
+            }
             navigationController.setViewControllers(viewControllers, animated: true)
         } else {
             self.dismiss()
@@ -169,7 +197,7 @@ public final class QrCodeScanScreen: ViewController {
     }
     
     override public func loadDisplayNode() {
-        self.displayNode = QrCodeScanScreenNode(context: self.context, presentationData: self.presentationData, controller: self, subject: self.subject)
+        self.displayNode = QrCodeScanScreenNode(context: self.context, sharedContext: self.sharedContext, presentationData: self.presentationData, controller: self, subject: self.subject)
         
         self.displayNodeDidLoad()
         
@@ -191,7 +219,8 @@ public final class QrCodeScanScreen: ViewController {
             switch strongSelf.subject {
                 case let .authTransfer(activeSessionsContext):
                     if let url = URL(string: code), let parsedToken = parseAuthTransferUrl(url) {
-                        strongSelf.approveDisposable.set((approveAuthTransferToken(account: strongSelf.context.account, token: parsedToken, activeSessionsContext: activeSessionsContext)
+                        if let context = strongSelf.context {
+                            strongSelf.approveDisposable.set((approveAuthTransferToken(account: context.account, token: parsedToken, activeSessionsContext: activeSessionsContext)
                         |> deliverOnMainQueue).start(next: { session in
                             guard let strongSelf = self else {
                                 return
@@ -203,6 +232,27 @@ public final class QrCodeScanScreen: ViewController {
                                 })
                             }
                             strongSelf.dismissWithSession(session: session)
+                        }, error: { _ in
+                            guard let strongSelf = self else {
+                                return
+                            }
+                            strongSelf.controllerNode.codeWithError = code
+                            strongSelf.controllerNode.updateFocusedRect(nil)
+                            }))
+                        }
+                    }
+                case let .authTransferUnauthorized(accountManager, account, syncContacts):
+                    if let url = URL(string: code), let parsedToken = parseAuthTransferUrl(url) {
+                        strongSelf.approveDisposable.set((importAuthTransferToken(accountManager: accountManager, account: account, token: parsedToken, syncContacts: syncContacts)
+                        |> deliverOnMainQueue).start(next: { result in
+                            guard let strongSelf = self else {
+                                return
+                            }
+                            switch result {
+                            case .loggedIn, .passwordRequested:
+                                strongSelf.codeResolved = true
+                                strongSelf.dismissAnimated()
+                            }
                         }, error: { _ in
                             guard let strongSelf = self else {
                                 return
@@ -334,7 +384,8 @@ private final class FrameNode: ASDisplayNode {
 }
 
 private final class QrCodeScanScreenNode: ViewControllerTracingNode, ASScrollViewDelegate {
-    private let context: AccountContext
+    private let context: AccountContext?
+    private let sharedContext: SharedAccountContext
     private var presentationData: PresentationData
     private weak var controller: QrCodeScanScreen?
     private let subject: QrCodeScanScreen.Subject
@@ -380,8 +431,9 @@ private final class QrCodeScanScreenNode: ViewControllerTracingNode, ASScrollVie
     
     private var highlightViews: [UIVisualEffectView] = []
     
-    init(context: AccountContext, presentationData: PresentationData, controller: QrCodeScanScreen, subject: QrCodeScanScreen.Subject) {
+    init(context: AccountContext?, sharedContext: SharedAccountContext, presentationData: PresentationData, controller: QrCodeScanScreen, subject: QrCodeScanScreen.Subject) {
         self.context = context
+        self.sharedContext = sharedContext
         self.presentationData = presentationData
         self.controller = controller
         self.subject = subject
@@ -423,7 +475,7 @@ private final class QrCodeScanScreenNode: ViewControllerTracingNode, ASScrollVie
         let title: String
         var text: String
         switch subject {
-            case .authTransfer:
+            case .authTransfer, .authTransferUnauthorized:
                 title = presentationData.strings.AuthSessions_AddDevice_ScanTitle
                 text = presentationData.strings.AuthSessions_AddDevice_ScanInstallInfo
             case .peer:
@@ -550,7 +602,7 @@ private final class QrCodeScanScreenNode: ViewControllerTracingNode, ASScrollVie
             }
             let filteredCodes: [CameraCode]
             switch strongSelf.subject {
-                case .authTransfer:
+                case .authTransfer, .authTransferUnauthorized:
                     filteredCodes = codes.filter { $0.message.hasPrefix("tg://") }
                 case .peer:
                     filteredCodes = codes.filter { $0.message.hasPrefix("https://t.me/") || $0.message.hasPrefix("t.me/") }
@@ -604,9 +656,13 @@ private final class QrCodeScanScreenNode: ViewControllerTracingNode, ASScrollVie
                                 if let url = attributes[NSAttributedString.Key(rawValue: TelegramTextAttributes.URL)] as? String {
                                     switch url {
                                     case "desktop":
-                                        self.context.sharedContext.openExternalUrl(context: self.context, urlContext: .generic, url: "https://getdesktop.telegram.org", forceExternal: true, presentationData: self.context.sharedContext.currentPresentationData.with { $0 }, navigationController: nil, dismissInput: {})
+                                        if let context = self.context {
+                                            self.sharedContext.openExternalUrl(context: context, urlContext: .generic, url: "https://getdesktop.telegram.org", forceExternal: true, presentationData: self.sharedContext.currentPresentationData.with { $0 }, navigationController: nil, dismissInput: {})
+                                        }
                                     case "web":
-                                        self.context.sharedContext.openExternalUrl(context: self.context, urlContext: .generic, url: "https://web.telegram.org", forceExternal: true, presentationData: self.context.sharedContext.currentPresentationData.with { $0 }, navigationController: nil, dismissInput: {})
+                                        if let context = self.context {
+                                            self.sharedContext.openExternalUrl(context: context, urlContext: .generic, url: "https://web.telegram.org", forceExternal: true, presentationData: self.sharedContext.currentPresentationData.with { $0 }, navigationController: nil, dismissInput: {})
+                                        }
                                     default:
                                         break
                                     }
@@ -823,7 +879,9 @@ private final class QrCodeScanScreenNode: ViewControllerTracingNode, ASScrollVie
     }
     
     @objc private func galleryPressed() {
-        let context = self.context
+        guard let context = self.context else {
+            return
+        }
         let presentationData = context.sharedContext.currentPresentationData.with { $0 }
         
         let presentError = { [weak self] in
@@ -882,7 +940,10 @@ private final class QrCodeScanScreenNode: ViewControllerTracingNode, ASScrollVie
     }
     
     fileprivate func resolveCode(code: String, completion: @escaping (Bool) -> Void) {
-        self.resolveDisposable.set((self.context.sharedContext.resolveUrl(context: self.context, peerId: nil, url: code, skipUrlAuth: false)
+        guard let context = self.context else {
+            return
+        }
+        self.resolveDisposable.set((self.sharedContext.resolveUrl(context: context, peerId: nil, url: code, skipUrlAuth: false)
         |> deliverOnMainQueue).start(next: { [weak self] result in
             if let strongSelf = self {
                 completion(strongSelf.openResolved(result))
@@ -901,11 +962,14 @@ private final class QrCodeScanScreenNode: ViewControllerTracingNode, ASScrollVie
         guard let navigationController = self.controller?.navigationController as? NavigationController else {
             return false
         }
-        self.context.sharedContext.openResolvedUrl(result, context: self.context, urlContext: .generic, navigationController: navigationController, forceExternal: false, forceUpdate: false, openPeer: { [weak self] peer, navigation in
+        guard let context = self.context else {
+            return false
+        }
+        self.sharedContext.openResolvedUrl(result, context: context, urlContext: .generic, navigationController: navigationController, forceExternal: false, forceUpdate: false, openPeer: { [weak self] peer, navigation in
             guard let strongSelf = self else {
                 return
             }
-            strongSelf.context.sharedContext.navigateToChatController(NavigateToChatControllerParams(navigationController: navigationController, context: strongSelf.context, chatLocation: .peer(peer), subject: nil, keepStack: .always, peekData: nil, completion: { [weak navigationController] _ in
+            strongSelf.sharedContext.navigateToChatController(NavigateToChatControllerParams(navigationController: navigationController, context: context, chatLocation: .peer(peer), subject: nil, keepStack: .always, peekData: nil, completion: { [weak navigationController] _ in
                 if let navigationController = navigationController {
                     var viewControllers = navigationController.viewControllers
                     viewControllers = viewControllers.filter { controller in

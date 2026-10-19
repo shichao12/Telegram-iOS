@@ -291,23 +291,47 @@ final class AuthorizedApplicationContext {
         }))
 
         let engine = context.engine
+        let accountPostbox = context.account.postbox
         self.notificationMessagesDisposable.set((context.account.stateManager.notificationMessages
         |> mapToSignal { messageList -> Signal<[([Message], PeerGroupId, Bool, MessageHistoryThreadData?)], NoError> in
-            return engine.data.get(EngineDataMap(
-                messageList.compactMap { item -> TelegramEngine.EngineData.Item.Messages.ChatListIndex? in
-                    if let message = item.0.first {
-                        return TelegramEngine.EngineData.Item.Messages.ChatListIndex(id: message.id.peerId)
-                    } else {
-                        return nil
-                    }
+            // Side effect: auto-read leading blacklisted unreads when safe (no older unreads).
+            // Uses the pre-filter list so blacklisted-only batches still get marked read.
+            let _ = (accountPostbox.transaction { transaction -> [MessageIndex] in
+                let settings = transaction.getPreferencesEntry(key: ApplicationSpecificPreferencesKeys.messageKeywordBlacklistSettings)?.get(MessageKeywordBlacklistSettings.self) ?? .defaultSettings
+                return settings.autoReadIndices(forNotificationMessages: messageList, transaction: transaction)
+            }
+            |> mapToSignal { indices -> Signal<Void, NoError> in
+                if indices.isEmpty {
+                    return .complete()
                 }
-            ))
-            |> map { chatListIndexMap -> [([Message], PeerGroupId, Bool, MessageHistoryThreadData?)] in
+                return combineLatest(indices.map { index in
+                    engine.messages.applyMaxReadIndexInteractively(index: index)
+                })
+                |> map { _ in Void() }
+            }).start()
+
+            let chatListIndexKeys = messageList.compactMap { item -> TelegramEngine.EngineData.Item.Messages.ChatListIndex? in
+                if let message = item.0.first {
+                    return TelegramEngine.EngineData.Item.Messages.ChatListIndex(id: message.id.peerId)
+                } else {
+                    return nil
+                }
+            }
+            return combineLatest(
+                engine.data.get(EngineDataMap(chatListIndexKeys)),
+                engine.data.get(TelegramEngine.EngineData.Item.Configuration.ApplicationSpecificPreference(key: ApplicationSpecificPreferencesKeys.messageKeywordBlacklistSettings))
+            )
+            |> map { chatListIndexMap, blacklistEntry -> [([Message], PeerGroupId, Bool, MessageHistoryThreadData?)] in
+                let blacklistSettings = blacklistEntry?.get(MessageKeywordBlacklistSettings.self) ?? .defaultSettings
                 return messageList.filter { item in
                     guard let message = item.0.first else {
                         return false
                     }
                     if let maybeChatListIndex = chatListIndexMap[message.id.peerId], maybeChatListIndex != nil {
+                        // Suppress in-app banners for keyword/link blacklisted channel messages.
+                        if blacklistSettings.shouldSuppressNotification(for: item.0) {
+                            return false
+                        }
                         return true
                     } else {
                         return false

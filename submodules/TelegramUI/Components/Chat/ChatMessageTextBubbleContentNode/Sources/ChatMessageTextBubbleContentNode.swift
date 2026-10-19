@@ -82,6 +82,110 @@ private func findQuoteRange(string: String, quoteText: String, offset: Int?) -> 
     return currentRange
 }
 
+private func telegramUsername(from value: String) -> String? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.hasPrefix("@") {
+        let username = String(trimmed.dropFirst())
+        return username.isEmpty ? nil : username.lowercased()
+    }
+
+    var urlValue = trimmed
+    if urlValue.lowercased().hasPrefix("t.me/") || urlValue.lowercased().hasPrefix("telegram.me/") || urlValue.lowercased().hasPrefix("telegram.dog/") {
+        urlValue = "https://" + urlValue
+    }
+    guard let components = URLComponents(string: urlValue) else {
+        return nil
+    }
+    if components.scheme?.lowercased() == "tg", components.host?.lowercased() == "resolve" {
+        return components.queryItems?.first(where: { $0.name.lowercased() == "domain" })?.value?.lowercased()
+    }
+    guard let host = components.host?.lowercased(), ["t.me", "www.t.me", "telegram.me", "www.telegram.me", "telegram.dog", "www.telegram.dog"].contains(host) else {
+        return nil
+    }
+    guard let firstComponent = components.path.split(separator: "/").first else {
+        return nil
+    }
+    let username = String(firstComponent).lowercased()
+    let reservedNames: Set<String> = ["c", "s", "iv", "joinchat", "addstickers", "addemoji", "addlist", "share", "proxy", "socks", "login", "boost", "giftcode", "confirmphone"]
+    guard !username.hasPrefix("+"), !reservedNames.contains(username) else {
+        return nil
+    }
+    return username
+}
+
+private final class TelegramLinkMembershipCache {
+    static let shared = TelegramLinkMembershipCache()
+
+    private struct CachedValue {
+        let isJoined: Bool
+        let timestamp: Double
+    }
+
+    private var values: [String: CachedValue] = [:]
+    private var pending: [String: [(Bool) -> Void]] = [:]
+
+    func resolve(context: AccountContext, username: String, completion: @escaping (Bool) -> Void) {
+        let key = "\(context.account.peerId.toInt64()):\(username.lowercased())"
+        let timestamp = CFAbsoluteTimeGetCurrent()
+        if let cached = self.values[key], timestamp - cached.timestamp < 2.0 {
+            completion(cached.isJoined)
+            return
+        }
+        if self.pending[key] != nil {
+            self.pending[key]?.append(completion)
+            return
+        }
+        self.pending[key] = [completion]
+
+        let _ = (context.engine.peers.resolvePeerByName(name: username, referrer: nil, ageLimit: 60)
+        |> filter { result in
+            if case .result = result {
+                return true
+            } else {
+                return false
+            }
+        }
+        |> take(1)
+        |> deliverOnMainQueue).startStandalone(next: { [weak self] result in
+            guard let self else {
+                return
+            }
+            let isJoined: Bool
+            if case let .result(peer) = result, let peer {
+                switch peer {
+                case let .channel(channel):
+                    if case .member = channel.participationStatus {
+                        isJoined = true
+                    } else {
+                        isJoined = false
+                    }
+                case let .legacyGroup(group):
+                    if case .Member = group.membership {
+                        isJoined = true
+                    } else {
+                        isJoined = false
+                    }
+                case let .community(community):
+                    if case .member = community.participationStatus {
+                        isJoined = true
+                    } else {
+                        isJoined = false
+                    }
+                default:
+                    isJoined = false
+                }
+            } else {
+                isJoined = false
+            }
+            self.values[key] = CachedValue(isJoined: isJoined, timestamp: CFAbsoluteTimeGetCurrent())
+            let completions = self.pending.removeValue(forKey: key) ?? []
+            for completion in completions {
+                completion(isJoined)
+            }
+        })
+    }
+}
+
 public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
     public final class ContainerNode: ASDisplayNode {
     }
@@ -98,6 +202,7 @@ public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
     private var textHighlightingNodes: [LinkHighlightingNode] = []
     
     private var cachedChatMessageText: CachedChatMessageText?
+    private let joinedTelegramUsernames = Atomic(value: Set<String>())
     
     private var textSelectionState: Promise<ChatControllerSubject.MessageOptionsInfo.SelectionState>?
     
@@ -214,6 +319,7 @@ public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
     
     override public func asyncLayoutContent() -> (_ item: ChatMessageBubbleContentItem, _ layoutConstants: ChatMessageItemLayoutConstants, _ preparePosition: ChatMessageBubblePreparePosition, _ messageSelection: Bool?, _ constrainedSize: CGSize, _ avatarInset: CGFloat) -> (ChatMessageBubbleContentProperties, CGSize?, CGFloat, (CGSize, ChatMessageBubbleContentPosition) -> (CGFloat, (CGFloat) -> (CGSize, (ListViewItemUpdateAnimation, Bool, ListViewItemApply?) -> Void))) {
         let previousItem = self.item
+        let joinedTelegramUsernames = self.joinedTelegramUsernames.with { $0 }
         
         let textLayout = InteractiveTextNodeWithEntities.asyncLayout(self.textNode)
         let statusLayout = ChatMessageDateAndStatusNode.asyncLayout(self.statusNode)
@@ -611,6 +717,44 @@ public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
                 } else {
                     attributedText = NSAttributedString(string: " ", font: textFont, textColor: messageTheme.primaryTextColor)
                 }
+
+                var telegramUsernamesToResolve = Set<String>()
+                if let entities {
+                    let updatedString = NSMutableAttributedString(attributedString: attributedText)
+                    let nsRawText = rawText as NSString
+                    let markedLinkColor = item.presentationData.theme.theme.overallDarkAppearance ? UIColor(rgb: 0xff806c) : UIColor(rgb: 0xd94a38)
+                    for entity in entities {
+                        let range = NSRange(location: entity.range.lowerBound, length: entity.range.upperBound - entity.range.lowerBound)
+                        guard range.location != NSNotFound, range.location >= 0, range.upperBound <= nsRawText.length else {
+                            continue
+                        }
+                        let displayedValue = nsRawText.substring(with: range)
+                        let linkValue: String
+                        switch entity.type {
+                        case .Url, .Mention:
+                            linkValue = displayedValue
+                        case let .TextUrl(url):
+                            linkValue = url
+                        default:
+                            continue
+                        }
+                        // markedLinks are pre-lowercased in chatHistoryEntriesForView.
+                        let linkLower = linkValue.lowercased()
+                        let displayedLower = displayedValue.lowercased()
+                        let isMarked = item.attributes.markedLinks.contains(where: { value in
+                            !value.isEmpty && (linkLower.contains(value) || displayedLower.contains(value))
+                        })
+                        if isMarked {
+                            updatedString.addAttribute(.foregroundColor, value: markedLinkColor, range: range)
+                        } else if let username = telegramUsername(from: linkValue) {
+                            telegramUsernamesToResolve.insert(username)
+                            if joinedTelegramUsernames.contains(username) {
+                                updatedString.addAttribute(.foregroundColor, value: messageTheme.secondaryTextColor, range: range)
+                            }
+                        }
+                    }
+                    attributedText = updatedString
+                }
                 
                 if let entities = entities {
                     let updatedString = NSMutableAttributedString(attributedString: attributedText)
@@ -791,6 +935,26 @@ public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
                     return (boundingSize, { [weak self] animation, synchronousLoads, itemApply in
                         if let strongSelf = self {
                             strongSelf.item = item
+                            for username in telegramUsernamesToResolve {
+                                TelegramLinkMembershipCache.shared.resolve(context: item.context, username: username, completion: { [weak strongSelf] isJoined in
+                                    guard let strongSelf, strongSelf.item?.message.id == item.message.id else {
+                                        return
+                                    }
+                                    let wasJoined = strongSelf.joinedTelegramUsernames.with { $0.contains(username) }
+                                    if wasJoined != isJoined {
+                                        let _ = strongSelf.joinedTelegramUsernames.modify { current in
+                                            var current = current
+                                            if isJoined {
+                                                current.insert(username)
+                                            } else {
+                                                current.remove(username)
+                                            }
+                                            return current
+                                        }
+                                        item.controllerInteraction.requestMessageUpdate(item.message.id, false, nil)
+                                    }
+                                })
+                            }
                             if let updatedCachedChatMessageText = updatedCachedChatMessageText {
                                 strongSelf.cachedChatMessageText = updatedCachedChatMessageText
                             }

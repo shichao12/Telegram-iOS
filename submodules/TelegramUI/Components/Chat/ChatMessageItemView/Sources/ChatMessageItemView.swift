@@ -877,6 +877,8 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
             switch button.action {
                 case let .url(url):
                     item.controllerInteraction.longTap(.url(url), ChatControllerInteraction.LongTapParams(message: item.message))
+                case let .urlAuth(url, _):
+                    item.controllerInteraction.longTap(.url(url), ChatControllerInteraction.LongTapParams(message: item.message))
                 default:
                     break
             }

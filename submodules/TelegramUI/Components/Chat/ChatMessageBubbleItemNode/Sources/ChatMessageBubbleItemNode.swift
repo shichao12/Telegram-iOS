@@ -1955,8 +1955,14 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
             if (item.associatedData.isCopyProtectionEnabled || item.message.isCopyProtected()) {
                 if mayHaveSeparateCommentsButton && hasCommentButton(item: item) {
                 } else {
-                    needsShareButton = false
-                    needsSummarizeButton = false
+                    var keepShareForMessageLink = false
+                    if let channel = item.message.peers[item.message.id.peerId] as? TelegramChannel, case .broadcast = channel.info {
+                        keepShareForMessageLink = true
+                    }
+                    if !keepShareForMessageLink {
+                        needsShareButton = false
+                        needsSummarizeButton = false
+                    }
                 }
             }
         }

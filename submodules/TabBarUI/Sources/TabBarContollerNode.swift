@@ -9,6 +9,13 @@ import TabBarComponent
 import GlassControls
 
 final class TabBarControllerNode: ASDisplayNode {
+    private struct AccessoryItem {
+        let id: AnyHashable
+        let title: String
+        let iconName: String
+        let action: () -> Void
+    }
+
     private struct Params: Equatable {
         let layout: ContainerViewLayout
         let toolbar: Toolbar?
@@ -66,6 +73,7 @@ final class TabBarControllerNode: ASDisplayNode {
     
     private(set) var tabBarItems: [TabBarNodeItem] = []
     private(set) var selectedIndex: Int = 0
+    private var accessoryItem: AccessoryItem?
 
     private weak var currentController: ViewController?
     
@@ -227,44 +235,60 @@ final class TabBarControllerNode: ASDisplayNode {
         if self.tabBarView.view == nil {
             tabBarTransition = .immediate
         }
+        var componentItems = self.tabBarItems.map { item in
+            let itemId = AnyHashable(ObjectIdentifier(item.item))
+
+            let index = self.tabBarItems.firstIndex(where: { AnyHashable(ObjectIdentifier($0.item)) == itemId }) ?? 0
+
+            return TabBarComponent.Item(
+                content: .tabBarItem(item.item),
+                action: { [weak self] isLongTap in
+                    guard let self else {
+                        return
+                    }
+                    if let index = self.tabBarItems.firstIndex(where: { AnyHashable(ObjectIdentifier($0.item)) == itemId }) {
+                        self.itemSelected(index, isLongTap, [])
+                    }
+                },
+                doubleTapAction: self.itemHasDoubleTapAction(index) ? { [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    if let index = self.tabBarItems.firstIndex(where: { AnyHashable(ObjectIdentifier($0.item)) == itemId }) {
+                        self.itemDoubleTapped(index)
+                    }
+                } : nil,
+                contextAction: { [weak self] gesture, sourceView in
+                    guard let self else {
+                        return
+                    }
+                    if let index = self.tabBarItems.firstIndex(where: { AnyHashable(ObjectIdentifier($0.item)) == itemId }) {
+                        self.contextAction(index, sourceView, gesture)
+                    }
+                }
+            )
+        }
+        if let accessoryItem = self.accessoryItem {
+            componentItems.append(TabBarComponent.Item(
+                content: .customItem(TabBarComponent.Item.Content.CustomItem(
+                    id: accessoryItem.id,
+                    title: accessoryItem.title,
+                    icon: .bundleIcon(name: accessoryItem.iconName)
+                )),
+                action: { _ in
+                    accessoryItem.action()
+                },
+                doubleTapAction: nil,
+                contextAction: nil
+            ))
+        }
+
         let tabBarSize = self.tabBarView.update(
             transition: tabBarTransition,
             component: AnyComponent(TabBarComponent(
                 theme: self.theme,
                 strings: self.strings,
-                items: self.tabBarItems.map { item in
-                    let itemId = AnyHashable(ObjectIdentifier(item.item))
-                    
-                    let index = self.tabBarItems.firstIndex(where: { AnyHashable(ObjectIdentifier($0.item)) == itemId }) ?? 0
-                    
-                    return TabBarComponent.Item(
-                        content: .tabBarItem(item.item),
-                        action: { [weak self] isLongTap in
-                            guard let self else {
-                                return
-                            }
-                            if let index = self.tabBarItems.firstIndex(where: { AnyHashable(ObjectIdentifier($0.item)) == itemId }) {
-                                self.itemSelected(index, isLongTap, [])
-                            }
-                        },
-                        doubleTapAction: self.itemHasDoubleTapAction(index) ? { [weak self] in
-                            guard let self else {
-                                return
-                            }
-                            if let index = self.tabBarItems.firstIndex(where: { AnyHashable(ObjectIdentifier($0.item)) == itemId }) {
-                                self.itemDoubleTapped(index)
-                            }
-                        } : nil,
-                        contextAction: { [weak self] gesture, sourceView in
-                            guard let self else {
-                                return
-                            }
-                            if let index = self.tabBarItems.firstIndex(where: { AnyHashable(ObjectIdentifier($0.item)) == itemId }) {
-                                self.contextAction(index, sourceView, gesture)
-                            }
-                        }
-                    )
-                },
+                items: componentItems,
                 search: self.currentController?.tabBarSearchState.flatMap { tabBarSearchState in
                     return TabBarComponent.Search(
                         isActive: tabBarSearchState.isActive,
@@ -411,6 +435,11 @@ final class TabBarControllerNode: ASDisplayNode {
     
     func updateTabBarItems(items: [TabBarNodeItem]) {
         self.tabBarItems = items
+        self.requestUpdate()
+    }
+
+    func updateAccessoryItem(id: AnyHashable, title: String, iconName: String, action: @escaping () -> Void) {
+        self.accessoryItem = AccessoryItem(id: id, title: title, iconName: iconName, action: action)
         self.requestUpdate()
     }
     

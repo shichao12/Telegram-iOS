@@ -953,17 +953,11 @@ public func recentSessionsController(context: AccountContext, activeSessionsCont
     
     let previousMode = Atomic<RecentSessionsMode>(value: .sessions)
     
-    let enableQRLogin = context.engine.data.subscribe(TelegramEngine.EngineData.Item.Configuration.ApplicationSpecificPreference(key: PreferencesKeys.appConfiguration))
-    |> map { view -> Bool in
-        guard let appConfiguration = view?.get(AppConfiguration.self) else {
-            return false
-        }
-        guard let data = appConfiguration.data, let enableQR = data["qr_login_camera"] as? Bool, enableQR else {
-            return false
-        }
-        return true
-    }
-    |> distinctUntilChanged
+    // Keep the "Link Desktop Device" QR scanner available for development and
+    // self-signed builds as well as the App Store build. The server-side
+    // `qr_login_camera` flag is only delivered to Telegram's official bundle,
+    // which otherwise hides this entry point in custom builds.
+    let enableQRLogin = Signal<Bool, NoError>.single(true)
     
     let connectedBotAndPeer = context.engine.data.subscribe(
         TelegramEngine.EngineData.Item.Peer.BusinessConnectedBot(id: context.account.peerId)

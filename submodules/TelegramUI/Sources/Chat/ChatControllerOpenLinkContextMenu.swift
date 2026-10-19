@@ -23,6 +23,49 @@ private struct ChatLinkOpenMode {
     let shouldOpenInApp: Bool
 }
 
+private enum ChatLinkBlacklistRuleMode: Equatable {
+    case hide
+    case mark
+}
+
+private enum ChatLinkBlacklistRuleScope: Equatable {
+    case global
+    case channel
+}
+
+private func addChatLinkBlacklistRule(context: AccountContext, peerId: EnginePeer.Id, url: String, mode: ChatLinkBlacklistRuleMode, scope: ChatLinkBlacklistRuleScope) {
+    let value = url.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty else {
+        return
+    }
+    let _ = context.engine.preferences.update(id: ApplicationSpecificPreferencesKeys.messageKeywordBlacklistSettings, { entry in
+        var settings = entry?.get(MessageKeywordBlacklistSettings.self) ?? .defaultSettings
+        switch mode {
+        case .hide:
+            var values = scope == .global ? settings.globalLinks : settings.links(peerId: peerId)
+            if !values.contains(where: { $0.caseInsensitiveCompare(value) == .orderedSame }) {
+                values.append(value)
+                if scope == .global {
+                    settings.globalLinks = values
+                } else {
+                    settings = settings.withUpdatedLinks(peerId: peerId, values)
+                }
+            }
+        case .mark:
+            var values = scope == .global ? settings.globalMarkedLinks : settings.markedLinks(peerId: peerId)
+            if !values.contains(where: { $0.caseInsensitiveCompare(value) == .orderedSame }) {
+                values.append(value)
+                if scope == .global {
+                    settings.globalMarkedLinks = values
+                } else {
+                    settings = settings.withUpdatedMarkedLinks(peerId: peerId, values)
+                }
+            }
+        }
+        return EnginePreferencesEntry(settings)
+    }).startStandalone()
+}
+
 private enum ChatLinkReverseOpenTarget {
     case inApp
     case externalBrowser
@@ -300,6 +343,33 @@ extension ChatControllerImpl {
                         }
                     }))
                 }
+                if !isPhoneNumber && !isEmail && !url.hasPrefix("tg-blacklist://"), let message = params.message {
+                    let peerId = message.id.peerId
+                    items.append(ActionSheetButtonItem(title: "隐藏到全局黑名单", color: .destructive, action: { [weak self, weak actionSheet] in
+                        actionSheet?.dismissAnimated()
+                        guard let self else { return }
+                        addChatLinkBlacklistRule(context: self.context, peerId: peerId, url: url, mode: .hide, scope: .global)
+                        self.present(UndoOverlayController(presentationData: self.presentationData, content: .succeed(text: "已加入全局链接黑名单", timeout: 3.0, customUndoText: nil), elevatedLayout: false, animateInAsReplacement: false, action: { _ in false }), in: .current)
+                    }))
+                    items.append(ActionSheetButtonItem(title: "隐藏到此频道黑名单", color: .destructive, action: { [weak self, weak actionSheet] in
+                        actionSheet?.dismissAnimated()
+                        guard let self else { return }
+                        addChatLinkBlacklistRule(context: self.context, peerId: peerId, url: url, mode: .hide, scope: .channel)
+                        self.present(UndoOverlayController(presentationData: self.presentationData, content: .succeed(text: "已加入此频道链接黑名单", timeout: 3.0, customUndoText: nil), elevatedLayout: false, animateInAsReplacement: false, action: { _ in false }), in: .current)
+                    }))
+                    items.append(ActionSheetButtonItem(title: "标记（全局）", color: .accent, action: { [weak self, weak actionSheet] in
+                        actionSheet?.dismissAnimated()
+                        guard let self else { return }
+                        addChatLinkBlacklistRule(context: self.context, peerId: peerId, url: url, mode: .mark, scope: .global)
+                        self.present(UndoOverlayController(presentationData: self.presentationData, content: .succeed(text: "已加入全局标记链接", timeout: 3.0, customUndoText: nil), elevatedLayout: false, animateInAsReplacement: false, action: { _ in false }), in: .current)
+                    }))
+                    items.append(ActionSheetButtonItem(title: "标记（此频道）", color: .accent, action: { [weak self, weak actionSheet] in
+                        actionSheet?.dismissAnimated()
+                        guard let self else { return }
+                        addChatLinkBlacklistRule(context: self.context, peerId: peerId, url: url, mode: .mark, scope: .channel)
+                        self.present(UndoOverlayController(presentationData: self.presentationData, content: .succeed(text: "已加入此频道标记链接", timeout: 3.0, customUndoText: nil), elevatedLayout: false, animateInAsReplacement: false, action: { _ in false }), in: .current)
+                    }))
+                }
                 actionSheet.setItemGroups([ActionSheetItemGroup(items: items), ActionSheetItemGroup(items: [
                     ActionSheetButtonItem(title: self.presentationData.strings.Common_Cancel, color: .accent, font: .bold, action: { [weak actionSheet] in
                         actionSheet?.dismissAnimated()
@@ -380,6 +450,50 @@ extension ChatControllerImpl {
                         }
                     }))
                 )
+            }
+
+            if !isEmail && !url.hasPrefix("tg-blacklist://") {
+                func scopeItems(mode: ChatLinkBlacklistRuleMode) -> [ContextMenuItem] {
+                    let iconName = mode == .hide ? "Chat/Context Menu/Restrict" : "Chat/Context Menu/Link"
+                    return [
+                        .action(ContextMenuActionItem(text: "返回", icon: { theme in
+                            return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Back"), color: theme.contextMenu.primaryColor)
+                        }, iconPosition: .left, action: { c, _ in
+                            c?.popItems()
+                        })),
+                        .separator,
+                        .action(ContextMenuActionItem(text: "全局", icon: { theme in
+                            return generateTintedImage(image: UIImage(bundleImageName: iconName), color: theme.contextMenu.primaryColor)
+                        }, action: { [weak self] c, _ in
+                            guard let self else {
+                                return
+                            }
+                            c?.dismiss(completion: {
+                                addChatLinkBlacklistRule(context: self.context, peerId: message.id.peerId, url: url, mode: mode, scope: .global)
+                            })
+                        })),
+                        .action(ContextMenuActionItem(text: "此频道", icon: { theme in
+                            return generateTintedImage(image: UIImage(bundleImageName: iconName), color: theme.contextMenu.primaryColor)
+                        }, action: { [weak self] c, _ in
+                            guard let self else {
+                                return
+                            }
+                            c?.dismiss(completion: {
+                                addChatLinkBlacklistRule(context: self.context, peerId: message.id.peerId, url: url, mode: mode, scope: .channel)
+                            })
+                        }))
+                    ]
+                }
+                items.append(.action(ContextMenuActionItem(text: "隐藏此链接", icon: { theme in
+                    return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Restrict"), color: theme.contextMenu.primaryColor)
+                }, action: { c, _ in
+                    c?.pushItems(items: .single(ContextController.Items(content: .list(scopeItems(mode: .hide)))))
+                })))
+                items.append(.action(ContextMenuActionItem(text: "标记此链接", icon: { theme in
+                    return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Link"), color: theme.contextMenu.primaryColor)
+                }, action: { c, _ in
+                    c?.pushItems(items: .single(ContextController.Items(content: .list(scopeItems(mode: .mark)))))
+                })))
             }
 
             items.append(

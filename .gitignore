@@ -84,3 +84,13 @@ xcode-files
 **/node_modules/
 tools/sim-watcher/dist/
 .mcp.json
+
+# Personal signing, local build configuration, and generated artifacts
+/build-output*/
+/build-system/guazi-codesigning/
+/build-system/my-codesigning/
+/build-system/guazi-configuration.json
+/build-system/my-dev-configuration.json
+/build-system/my-dev-device-configuration.json
+/build-system/my-dev-unique-configuration.json
+/build-system/selfsigned-configuration.json

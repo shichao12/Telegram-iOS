@@ -1,4 +1,5 @@
 import Foundation
+import Postbox
 import TelegramPresentationData
 import AccountContext
 import TelegramCore
@@ -91,65 +92,109 @@ func chatShareToSavedMessagesAdditionalView(_ chatController: ChatControllerImpl
 }
 
 extension ChatControllerImpl {
-//    func openMessageShareMenu(id: EngineMessage.Id) {
-//        guard let messages = self.chatDisplayNode.historyNode.messageGroupInCurrentHistoryView(id), let message = messages.first else {
-//            return
-//        }
-//        
-//        let chatPresentationInterfaceState = self.presentationInterfaceState
-//        var warnAboutPrivate = false
-//        var canShareToStory = false
-//        if case .peer = chatPresentationInterfaceState.chatLocation, let channel = message.peers[message.id.peerId] as? TelegramChannel {
-//            if case .broadcast = channel.info {
-//                canShareToStory = true
-//                if let message = messages.first, message.media.contains(where: { media in
-//                    if media is TelegramMediaContact || media is TelegramMediaPoll || media is TelegramMediaTodo {
-//                        return true
-//                    } else if let file = media as? TelegramMediaFile, file.isSticker || file.isAnimatedSticker || file.isVideoSticker {
-//                        return true
-//                    } else {
-//                        return false
-//                    }
-//                }) {
-//                    canShareToStory = false
-//                }
-//                if message.text.containsOnlyEmoji {
-//                    canShareToStory = false
-//                }
-//            }
-//            if channel.addressName == nil {
-//                warnAboutPrivate = true
-//            }
-//        }
-//        
-//        let _ = warnAboutPrivate
-//        
-////        let shareScreen = self.context.sharedContext.makeShareController(
-////            context: self.context,
-////            subject: .messages(messages),
-////            forceExternal: false,
-////            shareStory: canShareToStory ? { [weak self] in
-////                guard let self else {
-////                    return
-////                }
-////                Queue.mainQueue().after(0.15) {
-////                    let controller = self.context.sharedContext.makeStorySharingScreen(context: self.context, subject: .messages(messages), parentController: self)
-////                    self.push(controller)
-////                }
-////            } : nil,
-////            enqueued: nil,
-////            actionCompleted: nil
-////        )
-//        self.chatDisplayNode.dismissInput()
-//        self.push(shareScreen)
-//    }
-    
+    private func openCopyProtectedMessageShareMenu(messages: [Message], message: Message) {
+        let chatPresentationInterfaceState = self.presentationInterfaceState
+        var warnAboutPrivate = false
+        if case .peer = chatPresentationInterfaceState.chatLocation, let channel = message.peers[message.id.peerId] as? TelegramChannel {
+            if channel.addressName == nil {
+                warnAboutPrivate = true
+            }
+        }
+
+        let fallbackLink: String? = {
+            if let channel = message.peers[message.id.peerId] as? TelegramChannel, let addressName = channel.addressName, !addressName.isEmpty {
+                return "https://t.me/\(addressName)/\(message.id.id)"
+            }
+            return nil
+        }()
+
+        let _ = (self.context.engine.messages.exportMessageLink(peerId: message.id.peerId, messageId: message.id)
+        |> deliverOnMainQueue).startStandalone(next: { [weak self] exportedLink in
+            guard let self else {
+                return
+            }
+            let shareUrl: String
+            if let exportedLink, !exportedLink.isEmpty {
+                shareUrl = exportedLink
+            } else if let fallbackLink, !fallbackLink.isEmpty {
+                shareUrl = fallbackLink
+            } else {
+                self.present(UndoOverlayController(presentationData: self.presentationData, content: .info(title: nil, text: "无法获取消息链接", timeout: 3.0, customUndoText: nil), elevatedLayout: false, animateInAsReplacement: false, action: { _ in false }), in: .current)
+                return
+            }
+
+            let shareController = self.context.sharedContext.makeShareController(context: self.context, params: ShareControllerParams(subject: .url(shareUrl), updatedPresentationData: self.updatedPresentationData, shareAsLink: true, actionCompleted: { [weak self] in
+                guard let self else {
+                    return
+                }
+                let content: UndoOverlayContent
+                if warnAboutPrivate {
+                    content = .linkCopied(title: nil, text: self.presentationData.strings.Conversation_PrivateMessageLinkCopiedLong)
+                } else {
+                    content = .linkCopied(title: nil, text: self.presentationData.strings.Conversation_LinkCopied)
+                }
+                self.present(UndoOverlayController(presentationData: self.presentationData, content: content, elevatedLayout: false, animateInAsReplacement: false, action: { _ in return false }), in: .current)
+            }, dismissed: { [weak self] shared in
+                if shared {
+                    self?.commitPurposefulAction()
+                }
+            }, enqueued: { [weak self] peerIds, _ in
+                guard let self else {
+                    return
+                }
+                let _ = (self.context.engine.data.get(
+                    EngineDataList(
+                        peerIds.map(TelegramEngine.EngineData.Item.Peer.RenderedPeer.init)
+                    )
+                )
+                |> deliverOnMainQueue).startStandalone(next: { [weak self] peerList in
+                    guard let self else {
+                        return
+                    }
+                    let peers = peerList.compactMap { $0 }
+                    let presentationData = self.context.sharedContext.currentPresentationData.with { $0 }
+                    let text: String
+                    var savedMessages = false
+                    if peers.count == 1, peers.first?.peerId == self.context.account.peerId {
+                        text = presentationData.strings.Conversation_ForwardTooltip_SavedMessages_One
+                        savedMessages = true
+                    } else if peers.count == 1, let peer = peers.first?.chatOrMonoforumMainPeer {
+                        var peerName = peer.id == self.context.account.peerId ? presentationData.strings.DialogList_SavedMessages : peer.displayTitle(strings: presentationData.strings, displayOrder: presentationData.nameDisplayOrder)
+                        peerName = peerName.replacingOccurrences(of: "**", with: "")
+                        text = presentationData.strings.Conversation_ForwardTooltip_Chat_One(peerName).string
+                    } else if peers.count == 2, let firstPeer = peers.first?.chatOrMonoforumMainPeer, let secondPeer = peers.last?.chatOrMonoforumMainPeer {
+                        var firstPeerName = firstPeer.id == self.context.account.peerId ? presentationData.strings.DialogList_SavedMessages : firstPeer.displayTitle(strings: presentationData.strings, displayOrder: presentationData.nameDisplayOrder)
+                        firstPeerName = firstPeerName.replacingOccurrences(of: "**", with: "")
+                        var secondPeerName = secondPeer.id == self.context.account.peerId ? presentationData.strings.DialogList_SavedMessages : secondPeer.displayTitle(strings: presentationData.strings, displayOrder: presentationData.nameDisplayOrder)
+                        secondPeerName = secondPeerName.replacingOccurrences(of: "**", with: "")
+                        text = presentationData.strings.Conversation_ForwardTooltip_TwoChats_One(firstPeerName, secondPeerName).string
+                    } else if let peer = peers.first?.chatOrMonoforumMainPeer {
+                        var peerName = peer.displayTitle(strings: presentationData.strings, displayOrder: presentationData.nameDisplayOrder)
+                        peerName = peerName.replacingOccurrences(of: "**", with: "")
+                        text = presentationData.strings.Conversation_ForwardTooltip_ManyChats_One(peerName, "\(peers.count - 1)").string
+                    } else {
+                        text = ""
+                    }
+                    self.present(UndoOverlayController(presentationData: presentationData, content: .forward(savedMessages: savedMessages, text: text), elevatedLayout: false, position: savedMessages ? .top : .bottom, animateInAsReplacement: !savedMessages, action: { _ in false }), in: .current)
+                })
+            }))
+            self.chatDisplayNode.dismissInput()
+            self.present(shareController, in: .window(.root), blockInteraction: true)
+        })
+    }
+
     func openMessageShareMenu(id: EngineMessage.Id) {
         guard let messages = self.chatDisplayNode.historyNode.messageGroupInCurrentHistoryView(id), let message = messages.first else {
             return
         }
 
         let chatPresentationInterfaceState = self.presentationInterfaceState
+        let isCopyProtectedShare = chatPresentationInterfaceState.copyProtectionEnabled || messages.contains(where: { $0.isCopyProtected() })
+        if isCopyProtectedShare {
+            self.openCopyProtectedMessageShareMenu(messages: messages, message: message)
+            return
+        }
+
         var warnAboutPrivate = false
         var canShareToStory = false
         if case .peer = chatPresentationInterfaceState.chatLocation, let channel = message.peers[message.id.peerId] as? TelegramChannel {

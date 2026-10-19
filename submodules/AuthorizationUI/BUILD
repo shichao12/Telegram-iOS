@@ -32,6 +32,7 @@ swift_library(
         "//submodules/ImageCompression:ImageCompression",
         "//submodules/RMIntro:RMIntro",
         "//submodules/QrCode:QrCode",
+        "//submodules/QrCodeUI:QrCodeUI",
         "//submodules/PhoneInputNode:PhoneInputNode",
         "//submodules/CodeInputView:CodeInputView",
         "//submodules/DebugSettingsUI:DebugSettingsUI",

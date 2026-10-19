@@ -88,6 +88,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
     
     private var applicationInFocusDisposable: Disposable?
     private var storyUploadEventsDisposable: Disposable?
+
+    private var showCallsTab = false
+    private var areAuxiliaryTabsExpanded = false
     
     override public var minimizedContainer: MinimizedContainer? {
         didSet {
@@ -207,18 +210,10 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         }
         let callListController = CallListController(context: self.context, mode: .tab)
         
-        var controllers: [ViewController] = []
-        
         let contactsController = ContactsController(context: self.context)
         contactsController.switchToChatsController = {  [weak self] in
             self?.openChatsController(activateSearch: false)
         }
-        controllers.append(contactsController)
-        
-        if showCallsTab {
-            controllers.append(callListController)
-        }
-        controllers.append(chatListController)
         
         var restoreSettignsController: (ViewController & SettingsController)?
         if let sharedContext = self.context.sharedContext as? SharedAccountContextImpl {
@@ -237,31 +232,81 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
             strongSelf.pushViewController(debugController(sharedContext: strongSelf.context.sharedContext, context: strongSelf.context))
         }
         accountSettingsController.parentController = self
-        controllers.append(accountSettingsController)
-                
-        tabBarController.setControllers(controllers, selectedIndex: restoreSettignsController != nil ? (controllers.count - 1) : (controllers.count - 2))
-        
+
         self.contactsController = contactsController
         self.callListController = callListController
         self.chatListController = chatListController
         self.accountSettingsController = accountSettingsController
         self.rootTabController = tabBarController
+        self.showCallsTab = showCallsTab
+        self.areAuxiliaryTabsExpanded = false
+
+        let controllers = self.rootControllersForCurrentTabBarState()
+        tabBarController.setControllers(controllers, selectedIndex: restoreSettignsController != nil ? 1 : 0)
+        self.updateTabBarAccessoryItem()
         self.pushViewController(tabBarController, animated: false)
+    }
+
+    private func rootControllersForCurrentTabBarState() -> [ViewController] {
+        guard let contactsController = self.contactsController, let callListController = self.callListController, let chatListController = self.chatListController, let accountSettingsController = self.accountSettingsController else {
+            return []
+        }
+
+        var controllers: [ViewController] = []
+        if self.areAuxiliaryTabsExpanded {
+            controllers.append(contactsController)
+            if self.showCallsTab {
+                controllers.append(callListController)
+            }
+        }
+        controllers.append(chatListController)
+        controllers.append(accountSettingsController)
+        return controllers
+    }
+
+    private func updateTabBarAccessoryItem() {
+        guard let rootTabController = self.rootTabController as? TabBarControllerImpl else {
+            return
+        }
+
+        if self.areAuxiliaryTabsExpanded {
+            rootTabController.setAccessoryItem(
+                id: "rootTabs.collapse",
+                title: self.presentationData.strings.ChatList_Search_ShowLess,
+                iconName: "Chat/Context Menu/Collapse",
+                action: { [weak self] in
+                    self?.setAuxiliaryTabsExpanded(false)
+                }
+            )
+        } else {
+            rootTabController.setAccessoryItem(
+                id: "rootTabs.expand",
+                title: self.presentationData.strings.ChatList_Search_ShowMore,
+                iconName: "Chat/Context Menu/Expand",
+                action: { [weak self] in
+                    self?.setAuxiliaryTabsExpanded(true)
+                }
+            )
+        }
+    }
+
+    private func setAuxiliaryTabsExpanded(_ value: Bool) {
+        guard self.areAuxiliaryTabsExpanded != value, let rootTabController = self.rootTabController as? TabBarControllerImpl else {
+            return
+        }
+
+        self.areAuxiliaryTabsExpanded = value
+        rootTabController.setControllers(self.rootControllersForCurrentTabBarState(), selectedIndex: nil)
+        self.updateTabBarAccessoryItem()
     }
         
     public func updateRootControllers(showCallsTab: Bool) {
         guard let rootTabController = self.rootTabController as? TabBarControllerImpl else {
             return
         }
-        var controllers: [ViewController] = []
-        controllers.append(self.contactsController!)
-        if showCallsTab {
-            controllers.append(self.callListController!)
-        }
-        controllers.append(self.chatListController!)
-        controllers.append(self.accountSettingsController!)
-        
-        rootTabController.setControllers(controllers, selectedIndex: nil)
+        self.showCallsTab = showCallsTab
+        rootTabController.setControllers(self.rootControllersForCurrentTabBarState(), selectedIndex: nil)
+        self.updateTabBarAccessoryItem()
     }
     
     public func openChatsController(activateSearch: Bool, filter: ChatListSearchFilter = .chats, query: String? = nil) {

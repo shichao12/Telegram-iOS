@@ -12,9 +12,13 @@ import TextFormat
 import Markdown
 import Display
 import TelegramStringFormatting
+import TelegramUIPreferences
 
 struct ChatHistoryEntriesForViewState {
     private var messageStableIdToLocalId: [UInt32: Int64] = [:]
+    private var blacklistCacheSettings: MessageKeywordBlacklistSettings?
+    private var blacklistCachePeerId: PeerId?
+    private var blacklistMatchCache: [UInt32: (stableVersion: UInt32, match: MessageBlacklistMatch?)] = [:]
     
     init() {
     }
@@ -31,6 +35,246 @@ struct ChatHistoryEntriesForViewState {
             }
         }
     }
+
+    fileprivate mutating func cachedBlacklistMatch(message: Message, peerId: PeerId?, rules: PreparedMessageBlacklistRules, settings: MessageKeywordBlacklistSettings) -> MessageBlacklistMatch? {
+        if self.blacklistCacheSettings != settings || self.blacklistCachePeerId != peerId {
+            self.blacklistMatchCache.removeAll(keepingCapacity: true)
+            self.blacklistCacheSettings = settings
+            self.blacklistCachePeerId = peerId
+        }
+        if let cached = self.blacklistMatchCache[message.stableId], cached.stableVersion == message.stableVersion {
+            return cached.match
+        }
+        if self.blacklistMatchCache.count > 4000 {
+            self.blacklistMatchCache.removeAll(keepingCapacity: true)
+        }
+        let match: MessageBlacklistMatch?
+        if let hit = settings.matchMessage(message, peerId: peerId) {
+            switch hit {
+            case let .globalKeyword(v): match = .globalKeyword(v)
+            case let .channelKeyword(v): match = .channelKeyword(v)
+            case let .globalLink(v): match = .globalLink(v)
+            case let .channelLink(v): match = .channelLink(v)
+            }
+        } else {
+            match = nil
+        }
+        self.blacklistMatchCache[message.stableId] = (message.stableVersion, match)
+        return match
+    }
+}
+
+private enum MessageBlacklistMatch {
+    case globalKeyword(String)
+    case channelKeyword(String)
+    case globalLink(String)
+    case channelLink(String)
+
+    var bannerText: String {
+        switch self {
+        case let .globalKeyword(value):
+            return "因全局关键词黑名单“\(value)”已隐藏，点击临时查看"
+        case let .channelKeyword(value):
+            return "因此频道关键词黑名单“\(value)”已隐藏，点击临时查看"
+        case let .globalLink(value):
+            return "因全局链接黑名单“\(value)”已隐藏，点击临时查看"
+        case let .channelLink(value):
+            return "因此频道链接黑名单“\(value)”已隐藏，点击临时查看"
+        }
+    }
+}
+
+private struct PreparedMessageBlacklistRules {
+    struct Item {
+        let needle: String
+        let display: String
+    }
+
+    let globalKeywords: [Item]
+    let channelKeywords: [Item]
+    let globalLinks: [Item]
+    let channelLinks: [Item]
+    /// Lowercased needles used by bubble rendering.
+    let markedLinks: [String]
+    let hasKeywordRules: Bool
+    let hasLinkRules: Bool
+    let isEmpty: Bool
+
+    init(settings: MessageKeywordBlacklistSettings, peerId: PeerId?) {
+        func prepare(_ values: [String]) -> [Item] {
+            var result: [Item] = []
+            result.reserveCapacity(values.count)
+            for raw in values {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    continue
+                }
+                result.append(Item(needle: trimmed.lowercased(), display: trimmed))
+            }
+            return result
+        }
+
+        self.globalKeywords = prepare(settings.globalKeywords)
+        self.channelKeywords = peerId.flatMap { prepare(settings.keywords(peerId: $0)) } ?? []
+        self.globalLinks = prepare(settings.globalLinks)
+        self.channelLinks = peerId.flatMap { prepare(settings.links(peerId: $0)) } ?? []
+
+        var marked: [String] = []
+        marked.reserveCapacity(settings.globalMarkedLinks.count + 8)
+        for raw in settings.globalMarkedLinks {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                marked.append(trimmed.lowercased())
+            }
+        }
+        if let peerId {
+            for raw in settings.markedLinks(peerId: peerId) {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    marked.append(trimmed.lowercased())
+                }
+            }
+        }
+        self.markedLinks = marked
+        self.hasKeywordRules = !self.globalKeywords.isEmpty || !self.channelKeywords.isEmpty
+        self.hasLinkRules = !self.globalLinks.isEmpty || !self.channelLinks.isEmpty
+        self.isEmpty = !self.hasKeywordRules && !self.hasLinkRules
+    }
+
+    func match(message: Message) -> MessageBlacklistMatch? {
+        if self.isEmpty {
+            return nil
+        }
+        if message.media.contains(where: { $0 is TelegramMediaAction }) {
+            return nil
+        }
+
+        if self.hasKeywordRules {
+            let text = message.text
+            if !text.isEmpty {
+                // Lowercase once; plain contains is much cheaper than diacritic-insensitive searches on every keyword.
+                let textLower = text.lowercased()
+                for item in self.globalKeywords {
+                    if textLower.contains(item.needle) {
+                        return .globalKeyword(item.display)
+                    }
+                }
+                for item in self.channelKeywords {
+                    if textLower.contains(item.needle) {
+                        return .channelKeyword(item.display)
+                    }
+                }
+            }
+        }
+
+        if !self.hasLinkRules {
+            return nil
+        }
+
+        let messageLinks = messageBlacklistCandidateLinks(message: message)
+        if messageLinks.isEmpty {
+            return nil
+        }
+        var linksLower: [String] = []
+        linksLower.reserveCapacity(messageLinks.count)
+        for link in messageLinks {
+            linksLower.append(link.lowercased())
+        }
+
+        for item in self.globalLinks {
+            for link in linksLower {
+                if link.contains(item.needle) {
+                    return .globalLink(item.display)
+                }
+            }
+        }
+        for item in self.channelLinks {
+            for link in linksLower {
+                if link.contains(item.needle) {
+                    return .channelLink(item.display)
+                }
+            }
+        }
+        return nil
+    }
+}
+
+private func messageBlacklistCandidateLinks(message: Message) -> [String] {
+    var messageLinks: [String] = []
+
+    if !message.text.isEmpty {
+        messageLinks.append(message.text)
+    }
+
+    let nsText = message.text as NSString
+    for attribute in message.attributes {
+        if let attribute = attribute as? TextEntitiesMessageAttribute {
+            for entity in attribute.entities {
+                switch entity.type {
+                case let .TextUrl(url):
+                    if !url.isEmpty {
+                        messageLinks.append(url)
+                    }
+                case .Url:
+                    let range = NSRange(location: entity.range.lowerBound, length: entity.range.upperBound - entity.range.lowerBound)
+                    if range.location >= 0 && NSMaxRange(range) <= nsText.length {
+                        let value = nsText.substring(with: range)
+                        if !value.isEmpty {
+                            messageLinks.append(value)
+                        }
+                    }
+                default:
+                    break
+                }
+            }
+        } else if let attribute = attribute as? ReplyMarkupMessageAttribute {
+            for row in attribute.rows {
+                for button in row.buttons {
+                    switch button.action {
+                    case let .url(url):
+                        if !url.isEmpty {
+                            messageLinks.append(url)
+                        }
+                    case let .urlAuth(url, _):
+                        if !url.isEmpty {
+                            messageLinks.append(url)
+                        }
+                    case let .openWebView(url, _):
+                        if !url.isEmpty {
+                            messageLinks.append(url)
+                        }
+                    default:
+                        break
+                    }
+                }
+            }
+        } else if let attribute = attribute as? OutgoingChatContextResultMessageAttribute, let webpageUrl = attribute.webpageUrl, !webpageUrl.isEmpty {
+            messageLinks.append(webpageUrl)
+        }
+    }
+
+    for media in message.media {
+        if let webpage = media as? TelegramMediaWebpage {
+            switch webpage.content {
+            case let .Loaded(content):
+                if !content.url.isEmpty {
+                    messageLinks.append(content.url)
+                }
+                if !content.displayUrl.isEmpty {
+                    messageLinks.append(content.displayUrl)
+                }
+                if let embedUrl = content.embedUrl, !embedUrl.isEmpty {
+                    messageLinks.append(embedUrl)
+                }
+            case let .Pending(_, url):
+                if let url, !url.isEmpty {
+                    messageLinks.append(url)
+                }
+            }
+        }
+    }
+
+    return messageLinks
 }
 
 func chatHistoryEntriesForView(
@@ -60,7 +304,9 @@ func chatHistoryEntriesForView(
     adMessage: Message?,
     dynamicAdMessages: [Message],
     isMusicPlaylist: Bool,
-    pinToTopStableId: EngineMessage.StableId?
+    pinToTopStableId: EngineMessage.StableId?,
+    messageKeywordBlacklistSettings: MessageKeywordBlacklistSettings,
+    temporarilyRevealedBlacklistMessageIds: Set<MessageId>
 ) -> ([ChatHistoryEntry], ChatHistoryEntriesForViewState) {
     var currentState = currentState
     
@@ -140,10 +386,86 @@ func chatHistoryEntriesForView(
         }
     }
     
+    var temporarilyRevealedGroupingKeys = Set<Int64>()
+    for entry in view.entries {
+        if temporarilyRevealedBlacklistMessageIds.contains(entry.message.id), let groupingKey = entry.message.groupingKey {
+            temporarilyRevealedGroupingKeys.insert(groupingKey)
+        }
+    }
+
+    let blacklistRules = PreparedMessageBlacklistRules(settings: messageKeywordBlacklistSettings, peerId: location.peerId)
+
+    var hiddenGroupMatches: [Int64: (MessageId, MessageBlacklistMatch)] = [:]
+    if !blacklistRules.isEmpty {
+        for entry in view.entries {
+            let message = entry.message
+            guard let groupingKey = message.groupingKey, !temporarilyRevealedGroupingKeys.contains(groupingKey), hiddenGroupMatches[groupingKey] == nil else {
+                continue
+            }
+            if !temporarilyRevealedBlacklistMessageIds.contains(message.id), let match = currentState.cachedBlacklistMatch(message: message, peerId: location.peerId, rules: blacklistRules, settings: messageKeywordBlacklistSettings) {
+                hiddenGroupMatches[groupingKey] = (message.id, match)
+            }
+        }
+    }
+
     var count = 0
     loop: for entry in view.entries {
         var message = entry.message
         var isRead = entry.isRead
+        var isBlacklistPlaceholder = false
+
+        let blacklistMatch: MessageBlacklistMatch?
+        if let groupingKey = message.groupingKey {
+            if temporarilyRevealedGroupingKeys.contains(groupingKey) {
+                blacklistMatch = nil
+            } else if let groupMatch = hiddenGroupMatches[groupingKey] {
+                if groupMatch.0 != message.id {
+                    continue loop
+                }
+                blacklistMatch = groupMatch.1
+            } else {
+                blacklistMatch = nil
+            }
+        } else if !temporarilyRevealedBlacklistMessageIds.contains(message.id) {
+            if blacklistRules.isEmpty {
+                blacklistMatch = nil
+            } else {
+                blacklistMatch = currentState.cachedBlacklistMatch(message: message, peerId: location.peerId, rules: blacklistRules, settings: messageKeywordBlacklistSettings)
+            }
+        } else {
+            blacklistMatch = nil
+        }
+
+        if let blacklistMatch {
+            isBlacklistPlaceholder = true
+            let bannerText = blacklistMatch.bannerText
+            message = Message(
+                stableId: message.stableId,
+                stableVersion: message.stableVersion,
+                id: message.id,
+                globallyUniqueId: message.globallyUniqueId,
+                groupingKey: nil,
+                groupInfo: nil,
+                threadId: message.threadId,
+                timestamp: message.timestamp,
+                flags: message.flags,
+                tags: [],
+                globalTags: [],
+                localTags: [],
+                customTags: [],
+                forwardInfo: nil,
+                author: nil,
+                text: "",
+                attributes: [],
+                media: [TelegramMediaAction(action: .customText(text: bannerText, entities: [MessageTextEntity(range: 0 ..< (bannerText as NSString).length, type: .TextUrl(url: "tg-blacklist://reveal"))], additionalAttributes: nil))],
+                peers: SimpleDictionary<PeerId, Peer>(),
+                associatedMessages: SimpleDictionary<MessageId, Message>(),
+                associatedMessageIds: [],
+                associatedMedia: [:],
+                associatedThreadInfo: nil,
+                associatedStories: [:]
+            )
+        }
         
         var pinToTop = false
         if message.stableId == pinToTopStableId {
@@ -219,7 +541,7 @@ func chatHistoryEntriesForView(
             }
         }
         
-        var contentTypeHint: ChatMessageEntryContentType = .generic
+        var contentTypeHint: ChatMessageEntryContentType = isBlacklistPlaceholder ? .blacklistPlaceholder : .generic
         
         for media in message.media {
             if media is TelegramMediaDice {
@@ -249,6 +571,13 @@ func chatHistoryEntriesForView(
                 contentTypeHint = .animatedEmoji
             }
         }
+
+        let markedLinks: [String]
+        if isBlacklistPlaceholder || blacklistRules.markedLinks.isEmpty {
+            markedLinks = []
+        } else {
+            markedLinks = blacklistRules.markedLinks
+        }
     
         if groupMessages || reverseGroupedMessages {
             if let messageGroupingKey = message.groupingKey {
@@ -264,7 +593,7 @@ func chatHistoryEntriesForView(
                     isCentered = link.isCentered
                 }
                 
-                let attributes = ChatMessageEntryAttributes(rank: adminRank, isContact: entry.attributes.authorIsContact, contentTypeHint: contentTypeHint, updatingMedia: updatingMedia[message.id], isPlaying: message.index == associatedData.currentlyPlayingMessageId, isCentered: isCentered, authorStoryStats: message.author.flatMap { view.peerStoryStats[$0.id] }, displayContinueThreadFooter: false, pinToTop: pinToTop)
+                let attributes = ChatMessageEntryAttributes(rank: adminRank, isContact: entry.attributes.authorIsContact, contentTypeHint: contentTypeHint, updatingMedia: isBlacklistPlaceholder ? nil : updatingMedia[message.id], isPlaying: message.index == associatedData.currentlyPlayingMessageId, isCentered: isCentered, authorStoryStats: message.author.flatMap { view.peerStoryStats[$0.id] }, displayContinueThreadFooter: false, pinToTop: pinToTop, markedLinks: markedLinks)
                 
                 let groupStableId = currentState.messageGroupStableId(messageStableId: message.stableId, groupId: messageGroupingKey, isLocal: Namespaces.Message.allLocal.contains(message.id.namespace))
                 var found = false
@@ -310,7 +639,7 @@ func chatHistoryEntriesForView(
                     isCentered = link.isCentered
                 }
                 
-                entries.append(.MessageEntry(message, presentationData, isRead, entry.location, selection, ChatMessageEntryAttributes(rank: adminRank, isContact: entry.attributes.authorIsContact, contentTypeHint: contentTypeHint, updatingMedia: updatingMedia[message.id], isPlaying: message.index == associatedData.currentlyPlayingMessageId, isCentered: isCentered, authorStoryStats: message.author.flatMap { view.peerStoryStats[$0.id] }, displayContinueThreadFooter: false, pinToTop: pinToTop)))
+                entries.append(.MessageEntry(message, presentationData, isRead, entry.location, selection, ChatMessageEntryAttributes(rank: adminRank, isContact: entry.attributes.authorIsContact, contentTypeHint: contentTypeHint, updatingMedia: isBlacklistPlaceholder ? nil : updatingMedia[message.id], isPlaying: message.index == associatedData.currentlyPlayingMessageId, isCentered: isCentered, authorStoryStats: message.author.flatMap { view.peerStoryStats[$0.id] }, displayContinueThreadFooter: false, pinToTop: pinToTop, markedLinks: markedLinks)))
             }
         } else {
             let selection: ChatHistoryMessageSelection
@@ -320,7 +649,7 @@ func chatHistoryEntriesForView(
                 selection = .none
             }
             
-            entries.append(.MessageEntry(message, presentationData, isRead, entry.location, selection, ChatMessageEntryAttributes(rank: adminRank, isContact: entry.attributes.authorIsContact, contentTypeHint: contentTypeHint, updatingMedia: updatingMedia[message.id], isPlaying: message.index == associatedData.currentlyPlayingMessageId, isCentered: false, authorStoryStats: message.author.flatMap { view.peerStoryStats[$0.id] }, displayContinueThreadFooter: false, pinToTop: pinToTop)))
+            entries.append(.MessageEntry(message, presentationData, isRead, entry.location, selection, ChatMessageEntryAttributes(rank: adminRank, isContact: entry.attributes.authorIsContact, contentTypeHint: contentTypeHint, updatingMedia: isBlacklistPlaceholder ? nil : updatingMedia[message.id], isPlaying: message.index == associatedData.currentlyPlayingMessageId, isCentered: false, authorStoryStats: message.author.flatMap { view.peerStoryStats[$0.id] }, displayContinueThreadFooter: false, pinToTop: pinToTop, markedLinks: markedLinks)))
         }
     }
     

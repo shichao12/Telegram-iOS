@@ -195,23 +195,88 @@ public func chatListFilterPredicate(filter: ChatListFilterData, accountPeerId: E
     })
 }
 
-public func chatListViewForLocation(chatListLocation: ChatListControllerLocation, location: ChatListNodeLocation, account: Account, shouldLoadCanMessagePeer: Bool) -> Signal<ChatListNodeViewUpdate, NoError> {
+private func chatListFilterPredicateForAllChats(filters: [ChatListFilter], accountPeerId: EnginePeer.Id) -> ChatListFilterPredicate {
+    var excludedPeerIds = Set<PeerId>()
+    var folderPredicates: [ChatListFilterPredicate] = []
+    var requiresMessageTagSummary = false
+    for filter in filters {
+        if case let .filter(_, _, _, data) = filter {
+            excludedPeerIds.formUnion(data.includePeers.peers)
+            excludedPeerIds.formUnion(data.includePeers.pinnedPeers)
+
+            let predicate = chatListFilterPredicate(filter: data, accountPeerId: accountPeerId)
+            folderPredicates.append(predicate)
+            if predicate.messageTagSummary != nil {
+                requiresMessageTagSummary = true
+            }
+        }
+    }
+
+    let messageTagSummary: ChatListMessageTagSummaryResultCalculation?
+    if requiresMessageTagSummary {
+        messageTagSummary = ChatListMessageTagSummaryResultCalculation(
+            addCount: ChatListMessageTagSummaryResultComponent(tag: .unseenPersonalMessage, namespace: Namespaces.Message.Cloud),
+            subtractCount: ChatListMessageTagActionsSummaryResultComponent(type: PendingMessageActionType.consumeUnseenPersonalMessage, namespace: Namespaces.Message.Cloud)
+        )
+    } else {
+        messageTagSummary = nil
+    }
+
+    return ChatListFilterPredicate(
+        includePeerIds: [],
+        excludePeerIds: excludedPeerIds,
+        pinnedPeerIds: [],
+        messageTagSummary: messageTagSummary,
+        includeAdditionalPeerGroupIds: [],
+        include: { peer, isMuted, isUnread, isContact, messageTagSummaryResult in
+            for predicate in folderPredicates {
+                if predicate.includes(
+                    peer: peer,
+                    groupId: .root,
+                    isRemovedFromTotalUnreadCount: isMuted,
+                    isUnread: isUnread,
+                    isContact: isContact,
+                    messageTagSummaryResult: messageTagSummaryResult
+                ) {
+                    return false
+                }
+            }
+            return true
+        }
+    )
+}
+
+public func chatListViewForLocation(chatListLocation: ChatListControllerLocation, location: ChatListNodeLocation, account: Account, shouldLoadCanMessagePeer: Bool, excludeFolderChatsFromAllChats: Bool = false) -> Signal<ChatListNodeViewUpdate, NoError> {
     let accountPeerId = account.peerId
     
     switch chatListLocation {
     case let .chatList(groupId):
-        let filterPredicate: ChatListFilterPredicate?
-        if let filter = location.filter, case let .filter(_, _, _, data) = filter {
-            filterPredicate = chatListFilterPredicate(filter: data, accountPeerId: account.peerId)
+        let filterPredicateSignal: Signal<ChatListFilterPredicate?, NoError>
+        if excludeFolderChatsFromAllChats && location.filter == nil && groupId == .root {
+            filterPredicateSignal = TelegramEngine(account: account).peers.updatedChatListFilters()
+            |> map { filters -> ChatListFilterPredicate? in
+                return chatListFilterPredicateForAllChats(filters: filters, accountPeerId: account.peerId)
+            }
+        } else if let filter = location.filter {
+            switch filter {
+            case .allChats:
+                filterPredicateSignal = TelegramEngine(account: account).peers.updatedChatListFilters()
+                |> map { filters -> ChatListFilterPredicate? in
+                    return chatListFilterPredicateForAllChats(filters: filters, accountPeerId: account.peerId)
+                }
+            case let .filter(_, _, _, data):
+                filterPredicateSignal = .single(chatListFilterPredicate(filter: data, accountPeerId: account.peerId))
+            }
         } else {
-            filterPredicate = nil
+            filterPredicateSignal = .single(nil)
         }
         
         switch location {
         case let .initial(count, _):
-            let signal: Signal<(ChatListView, ViewUpdateType), NoError>
-            signal = account.viewTracker.tailChatListView(groupId: groupId._asGroup(), filterPredicate: filterPredicate, count: count, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer)
-            return signal
+            return filterPredicateSignal
+            |> mapToSignal { filterPredicate in
+                return account.viewTracker.tailChatListView(groupId: groupId._asGroup(), filterPredicate: filterPredicate, count: count, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer)
+            }
             |> map { view, updateType -> ChatListNodeViewUpdate in
                 return ChatListNodeViewUpdate(list: EngineChatList(view, accountPeerId: accountPeerId), type: updateType, scrollPosition: nil)
             }
@@ -222,17 +287,23 @@ public func chatListViewForLocation(chatListLocation: ChatListControllerLocation
             guard case let .chatList(index) = index else {
                 return .never()
             }
-            var first = true
-            return account.viewTracker.aroundChatListView(groupId: groupId._asGroup(), filterPredicate: filterPredicate, index: index, count: 80, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer)
-            |> map { view, updateType -> ChatListNodeViewUpdate in
-                let genericType: ViewUpdateType
-                if first {
-                    first = false
-                    genericType = ViewUpdateType.UpdateVisible
-                } else {
-                    genericType = updateType
+            return filterPredicateSignal
+            |> mapToSignal { filterPredicate in
+                var first = true
+                return account.viewTracker.aroundChatListView(groupId: groupId._asGroup(), filterPredicate: filterPredicate, index: index, count: 80, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer)
+                |> map { view, updateType -> (ChatListView, ViewUpdateType) in
+                    let genericType: ViewUpdateType
+                    if first {
+                        first = false
+                        genericType = ViewUpdateType.UpdateVisible
+                    } else {
+                        genericType = updateType
+                    }
+                    return (view, genericType)
                 }
-                return ChatListNodeViewUpdate(list: EngineChatList(view, accountPeerId: accountPeerId), type: genericType, scrollPosition: nil)
+            }
+            |> map { view, updateType -> ChatListNodeViewUpdate in
+                return ChatListNodeViewUpdate(list: EngineChatList(view, accountPeerId: accountPeerId), type: updateType, scrollPosition: nil)
             }
             |> mapToSignal { update -> Signal<ChatListNodeViewUpdate, NoError> in
                 return chatListNodeViewUpdateWithCommunitySummaries(account: account, update: update)
@@ -244,18 +315,21 @@ public func chatListViewForLocation(chatListLocation: ChatListControllerLocation
             
             let directionHint: ListViewScrollToItemDirectionHint = sourceIndex > .chatList(index) ? .Down : .Up
             let chatScrollPosition: ChatListNodeViewScrollPosition = .index(index: index, position: scrollPosition, directionHint: directionHint, animated: animated)
-            var first = true
-            return account.viewTracker.aroundChatListView(groupId: groupId._asGroup(), filterPredicate: filterPredicate, index: index, count: 80, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer)
-            |> map { view, updateType -> ChatListNodeViewUpdate in
-                let genericType: ViewUpdateType
-                let scrollPosition: ChatListNodeViewScrollPosition? = first ? chatScrollPosition : nil
-                if first {
-                    first = false
-                    genericType = ViewUpdateType.UpdateVisible
-                } else {
-                    genericType = updateType
+            return filterPredicateSignal
+            |> mapToSignal { filterPredicate in
+                var first = true
+                return account.viewTracker.aroundChatListView(groupId: groupId._asGroup(), filterPredicate: filterPredicate, index: index, count: 80, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer)
+                |> map { view, updateType -> ChatListNodeViewUpdate in
+                    let genericType: ViewUpdateType
+                    let scrollPosition: ChatListNodeViewScrollPosition? = first ? chatScrollPosition : nil
+                    if first {
+                        first = false
+                        genericType = ViewUpdateType.UpdateVisible
+                    } else {
+                        genericType = updateType
+                    }
+                    return ChatListNodeViewUpdate(list: EngineChatList(view, accountPeerId: accountPeerId), type: genericType, scrollPosition: scrollPosition)
                 }
-                return ChatListNodeViewUpdate(list: EngineChatList(view, accountPeerId: accountPeerId), type: genericType, scrollPosition: scrollPosition)
             }
             |> mapToSignal { update -> Signal<ChatListNodeViewUpdate, NoError> in
                 return chatListNodeViewUpdateWithCommunitySummaries(account: account, update: update)

@@ -381,7 +381,13 @@ public class ChatMessageInstantVideoItemNode: ChatMessageItemView, ASGestureReco
                 }
                 
                 if item.associatedData.isCopyProtectionEnabled || item.message.isCopyProtected() {
-                    needsShareButton = false
+                    var keepShareForMessageLink = false
+                    if let channel = item.message.peers[item.message.id.peerId] as? TelegramChannel, case .broadcast = channel.info {
+                        keepShareForMessageLink = true
+                    }
+                    if !keepShareForMessageLink {
+                        needsShareButton = false
+                    }
                 }
             }
             

@@ -652,6 +652,15 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
             }
         }
     }
+
+    private let temporarilyRevealedBlacklistMessageIdsPromise = ValuePromise<Set<MessageId>>(Set(), ignoreRepeated: true)
+    private var temporarilyRevealedBlacklistMessageIds = Set<MessageId>()
+
+    func temporarilyRevealBlacklistMessage(_ messageId: MessageId) {
+        if self.temporarilyRevealedBlacklistMessageIds.insert(messageId).inserted {
+            self.temporarilyRevealedBlacklistMessageIdsPromise.set(self.temporarilyRevealedBlacklistMessageIds)
+        }
+    }
     
     private let justSentTextMessagePromise = ValuePromise<Bool>(false)
     var justSentTextMessage: Bool = false {
@@ -1329,50 +1338,14 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
     }
     
     private func beginAdMessageManagement(adMessages: Signal<(interPostInterval: Int32?, messages: [Message], startDelay: Int32?, betweenDelay: Int32?), NoError>) {
-        self.adMessagesDisposable = (adMessages
-        |> deliverOnMainQueue).startStrict(next: { [weak self] interPostInterval, messages, _, _ in
-            guard let self else {
-                return
-            }
-            
-            if let interPostInterval = interPostInterval {
-                self.pendingDynamicAdMessages = messages
-                self.pendingDynamicAdMessageInterval = Int(interPostInterval)
-                
-                if self.remainingDynamicAdMessageInterval == nil {
-                    self.remainingDynamicAdMessageInterval = Int(interPostInterval)
-                }
-                if self.remainingDynamicAdMessageDistance == nil {
-                    self.remainingDynamicAdMessageDistance = self.bounds.height
-                }
-                
-                self.allAdMessages = (messages.first, [], 0)
-            } else {
-                var adPeerName: String?
-                if let adAttribute = messages.first?.adAttribute, let parsedUrl = parseAdUrl(sharedContext: self.context.sharedContext, context: self.context, url: adAttribute.url), case let .peer(reference, _) = parsedUrl, case let .name(peerName) = reference {
-                    adPeerName = peerName
-                }
-                
-                if self.preloadAdPeerName != adPeerName {
-                    self.preloadAdPeerName = adPeerName
-                    if let adPeerName {
-                        let context = self.context
-                        let combinedDisposable = DisposableSet()
-                        self.preloadAdPeerDisposable.set(combinedDisposable)
-                        combinedDisposable.add(context.engine.peers.resolvePeerByName(name: adPeerName, referrer: nil).startStrict(next: { result in
-                            if case let .result(maybePeer) = result, let peer = maybePeer {
-                                combinedDisposable.add(context.account.viewTracker.polledChannel(peerId: peer.id).startStrict())
-                                combinedDisposable.add(context.account.addAdditionalPreloadHistoryPeerId(peerId: peer.id))
-                            }
-                        }))
-                    } else {
-                        self.preloadAdPeerDisposable.set(nil)
-                    }
-                }
-                
-                self.allAdMessages = (messages.first, [], 0)
-            }
-        }).strict()
+        self.adMessagesDisposable = nil
+        self.pendingDynamicAdMessages.removeAll()
+        self.pendingDynamicAdMessageInterval = nil
+        self.remainingDynamicAdMessageInterval = nil
+        self.remainingDynamicAdMessageDistance = nil
+        self.preloadAdPeerName = nil
+        self.preloadAdPeerDisposable.set(nil)
+        self.allAdMessages = (nil, [], self.allAdMessages.version + 1)
     }
     
     private let fixedCombinedReadStates = Atomic<MessageHistoryViewReadState?>(value: nil)
@@ -1827,6 +1800,16 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
         )
         
         let contentSettings = self.context.engine.data.subscribe(TelegramEngine.EngineData.Item.Configuration.ContentSettings())
+
+        let messageKeywordBlacklistSettings = self.context.engine.data.subscribe(
+            TelegramEngine.EngineData.Item.Configuration.ApplicationSpecificPreference(key: ApplicationSpecificPreferencesKeys.messageKeywordBlacklistSettings)
+        )
+        |> map { entry -> MessageKeywordBlacklistSettings in
+            return entry?.get(MessageKeywordBlacklistSettings.self) ?? .defaultSettings
+        }
+        |> distinctUntilChanged
+
+        let contentAndBlacklistSettings = combineLatest(contentSettings, messageKeywordBlacklistSettings, self.temporarilyRevealedBlacklistMessageIdsPromise.get())
         
         let maxReadStoryId: Signal<Int32?, NoError>
         if let peerId = self.chatLocation.peerId, peerId.namespace == Namespaces.Peer.CloudUser {
@@ -1934,8 +1917,9 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
             audioTranscriptionTrial |> debug_measureTimeToFirstEvent(label: "chatHistoryNode_audioTranscriptionTrial"),
             chatThemes |> debug_measureTimeToFirstEvent(label: "chatHistoryNode_chatThemes"),
             deviceContactsNumbers |> debug_measureTimeToFirstEvent(label: "chatHistoryNode_deviceContactsNumbers"),
-            contentSettings |> debug_measureTimeToFirstEvent(label: "chatHistoryNode_contentSettings")
-        ) |> debug_measureTimeToFirstEvent(label: "chatHistoryNode_firstChatHistoryTransition")).startStrict(next: { [weak self] update, chatPresentationData, selectedMessages, updatingMedia, networkType, preferredStoryHighQuality, animatedEmojiStickers, additionalAnimatedEmojiStickers, customChannelDiscussionReadState, customThreadOutgoingReadState, availableReactions, availableMessageEffects, savedMessageTags, defaultReaction, accountPeer, accountCountry, suggestAudioTranscription, promises, topicAuthorId, translationState, maxReadStoryId, recommendedChannels, audioTranscriptionTrial, chatThemes, deviceContactsNumbers, contentSettings in
+            contentAndBlacklistSettings |> debug_measureTimeToFirstEvent(label: "chatHistoryNode_contentAndBlacklistSettings")
+        ) |> debug_measureTimeToFirstEvent(label: "chatHistoryNode_firstChatHistoryTransition")).startStrict(next: { [weak self] update, chatPresentationData, selectedMessages, updatingMedia, networkType, preferredStoryHighQuality, animatedEmojiStickers, additionalAnimatedEmojiStickers, customChannelDiscussionReadState, customThreadOutgoingReadState, availableReactions, availableMessageEffects, savedMessageTags, defaultReaction, accountPeer, accountCountry, suggestAudioTranscription, promises, topicAuthorId, translationState, maxReadStoryId, recommendedChannels, audioTranscriptionTrial, chatThemes, deviceContactsNumbers, contentAndBlacklistSettings in
+            let (_, messageKeywordBlacklistSettings, temporarilyRevealedBlacklistMessageIds) = contentAndBlacklistSettings
             let (historyAppearsCleared, pendingUnpinnedAllMessages, pendingRemovedMessages, currentlyPlayingMessageIdAndType, scrollToMessageId, chatHasBots, allAdMessages) = promises
             
             if measure_isFirstTime {
@@ -2179,7 +2163,7 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
                     isSuspiciousPeer = true
                 }
                 
-                let associatedData = extractAssociatedData(chatLocation: chatLocation, view: view, automaticDownloadNetworkType: networkType, preferredStoryHighQuality: preferredStoryHighQuality, animatedEmojiStickers: animatedEmojiStickers, additionalAnimatedEmojiStickers: additionalAnimatedEmojiStickers, subject: subject, currentlyPlayingMessageId: currentlyPlayingMessageIdAndType?.0, isCopyProtectionEnabled: isCopyProtectionEnabled, availableReactions: availableReactions, availableMessageEffects: availableMessageEffects, savedMessageTags: savedMessageTags, defaultReaction: defaultReaction.0, areStarReactionsEnabled: defaultReaction.1, isPremium: isPremium, alwaysDisplayTranscribeButton: alwaysDisplayTranscribeButton, accountPeer: accountPeer, topicAuthorId: topicAuthorId, hasBots: chatHasBots, translateToLanguage: translateToLanguage?.toLang, maxReadStoryId: maxReadStoryId, recommendedChannels: recommendedChannels, audioTranscriptionTrial: audioTranscriptionTrial, chatThemes: chatThemes, deviceContactsNumbers: deviceContactsNumbers, isInline: !rotated, showSensitiveContent: contentSettings.ignoreContentRestrictionReasons.contains("sensitive"), isSuspiciousPeer: isSuspiciousPeer, accountCountry: accountCountry)
+                let associatedData = extractAssociatedData(chatLocation: chatLocation, view: view, automaticDownloadNetworkType: networkType, preferredStoryHighQuality: preferredStoryHighQuality, animatedEmojiStickers: animatedEmojiStickers, additionalAnimatedEmojiStickers: additionalAnimatedEmojiStickers, subject: subject, currentlyPlayingMessageId: currentlyPlayingMessageIdAndType?.0, isCopyProtectionEnabled: isCopyProtectionEnabled, availableReactions: availableReactions, availableMessageEffects: availableMessageEffects, savedMessageTags: savedMessageTags, defaultReaction: defaultReaction.0, areStarReactionsEnabled: defaultReaction.1, isPremium: isPremium, alwaysDisplayTranscribeButton: alwaysDisplayTranscribeButton, accountPeer: accountPeer, topicAuthorId: topicAuthorId, hasBots: chatHasBots, translateToLanguage: translateToLanguage?.toLang, maxReadStoryId: maxReadStoryId, recommendedChannels: recommendedChannels, audioTranscriptionTrial: audioTranscriptionTrial, chatThemes: chatThemes, deviceContactsNumbers: deviceContactsNumbers, isInline: !rotated, showSensitiveContent: true, isSuspiciousPeer: isSuspiciousPeer, accountCountry: accountCountry)
                 
                 var includeEmbeddedSavedChatInfo = false
                 if case let .replyThread(message) = chatLocation, message.peerId == context.account.peerId, !rotated {
@@ -2237,7 +2221,9 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
                     adMessage: allAdMessages.fixed,
                     dynamicAdMessages: allAdMessages.opportunistic,
                     isMusicPlaylist: isMusicPlaylist,
-                    pinToTopStableId: pinToTopStableId
+                    pinToTopStableId: pinToTopStableId,
+                    messageKeywordBlacklistSettings: messageKeywordBlacklistSettings,
+                    temporarilyRevealedBlacklistMessageIds: temporarilyRevealedBlacklistMessageIds
                 )
                 let lastHeaderId = filteredEntries.last.flatMap { listMessageDateHeaderId(timestamp: $0.index.timestamp) } ?? 0
                 let processedView = ChatHistoryView(originalView: view, filteredEntries: filteredEntries, associatedData: associatedData, lastHeaderId: lastHeaderId, id: id, locationInput: update.2, ignoreMessagesInTimestampRange: update.3, ignoreMessageIds: update.4)

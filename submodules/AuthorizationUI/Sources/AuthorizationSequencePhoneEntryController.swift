@@ -13,6 +13,7 @@ import PhoneNumberFormat
 import DebugSettingsUI
 import MessageUI
 import AuthenticationServices
+import QrCodeUI
 
 public final class AuthorizationSequencePhoneEntryController: ViewController, MFMailComposeViewControllerDelegate, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
     private var controllerNode: AuthorizationSequencePhoneEntryControllerNode {
@@ -57,6 +58,7 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     public var loginWithNumber: ((String, Bool) -> Void)?
     public var loginWithPasskey: ((AuthorizationPasskeyData, Bool) -> Void)?
     var accountUpdated: ((UnauthorizedAccount) -> Void)?
+    var scanQrLogin: (() -> Void)?
     
     weak var confirmationController: PhoneConfirmationController?
     
@@ -112,7 +114,7 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
     }
     
     func updateNavigationItems() {
-        guard let layout = self.validLayout, layout.size.width < 360.0 else {
+        guard let layout = self.validLayout else {
             return
         }
                 
@@ -120,8 +122,21 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
             let item = UIBarButtonItem(customDisplayNode: ProgressNavigationButtonNode(color: self.presentationData.theme.rootController.navigationBar.accentTextColor))
             self.navigationItem.rightBarButtonItem = item
         } else {
-            self.navigationItem.rightBarButtonItem = UIBarButtonItem(title: self.presentationData.strings.Common_Next, style: .done, target: self, action: #selector(self.nextPressed))
+            let qrItem = UIBarButtonItem(title: self.presentationData.strings.AuthSessions_LinkDesktopDevice, style: .plain, target: self, action: #selector(self.scanQrLoginPressed))
+            if layout.size.width < 360.0 {
+                let nextItem = UIBarButtonItem(title: self.presentationData.strings.Common_Next, style: .done, target: self, action: #selector(self.nextPressed))
+                self.navigationItem.rightBarButtonItems = [nextItem, qrItem]
+            } else {
+                self.navigationItem.rightBarButtonItem = qrItem
+            }
         }
+    }
+
+    @objc private func scanQrLoginPressed() {
+        // Show a login QR code that can be scanned from an already logged-in
+        // Telegram client. The previous implementation opened the camera
+        // scanner, which is the opposite direction for this login flow.
+        self.controllerNode.showQrLoginCode()
     }
     
     public func updateData(countryCode: Int32, countryName: String?, number: String) {
@@ -201,6 +216,14 @@ public final class AuthorizationSequencePhoneEntryController: ViewController, MF
         }
         
         self.loadAndPresentPasskey(force: false)
+    }
+
+    private func presentQrLoginScanner() {
+        guard let account = self.account else {
+            return
+        }
+        let controller = QrCodeScanScreen(sharedContext: self.sharedContext, account: account, subject: .authTransferUnauthorized(accountManager: self.sharedContext.accountManager, account: account, syncContacts: self.controllerNode.syncContacts))
+        self.push(controller)
     }
     
     private func loadAndPresentPasskey(force: Bool) {

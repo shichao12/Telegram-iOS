@@ -1066,7 +1066,15 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController 
                 })))
                 
                 if let _ = filters.first(where: { $0.id == id }) {
-                    items.append(.action(ContextMenuActionItem(text: self.presentationData.strings.ChatList_AddChatsToFolder, icon: { theme in
+                    let selectedPeerIdsForFolder = self.chatListDisplayNode.mainContainerNode.currentItemNode.currentState.selectedPeerIds
+                    let hasSelectedPeersForFolder = self.chatListDisplayNode.mainContainerNode.currentItemNode.currentState.editing && !selectedPeerIdsForFolder.isEmpty
+                    let addChatsTitle: String
+                    if hasSelectedPeersForFolder {
+                        addChatsTitle = self.presentationData.strings.FolderLinkPreview_TitleAddChats(Int32(selectedPeerIdsForFolder.count))
+                    } else {
+                        addChatsTitle = self.presentationData.strings.ChatList_AddChatsToFolder
+                    }
+                    items.append(.action(ContextMenuActionItem(text: addChatsTitle, icon: { theme in
                         return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Add"), color: theme.contextMenu.primaryColor)
                     }, action: { [weak self] c, f in
                         c?.dismiss(completion: {
@@ -1101,7 +1109,7 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController 
                                     }
                                     var found = false
                                     for filter in presetList {
-                                        if filter.id == id, case let .filter(_, _, _, data) = filter {
+                                        if filter.id == id, case let .filter(_, title, _, data) = filter {
                                             let (accountPeer, limits, premiumLimits) = result
                                             let isPremium = accountPeer?.isPremium ?? false
                                             
@@ -1130,6 +1138,88 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController 
                                                 return
                                             }
                                             
+                                            if hasSelectedPeersForFolder {
+                                                let peerIdsToAdd = Array(selectedPeerIdsForFolder)
+                                                let effectiveLimit = Int(isPremium ? premiumLimit : limit)
+                                                var existingPeerIds = Set(data.includePeers.peers)
+                                                existingPeerIds.formUnion(data.includePeers.pinnedPeers)
+
+                                                var peersToAdd: [EnginePeer.Id] = []
+                                                var nextCount = data.includePeers.peers.count
+                                                for peerId in peerIdsToAdd {
+                                                    if existingPeerIds.contains(peerId) {
+                                                        continue
+                                                    }
+                                                    if nextCount >= effectiveLimit {
+                                                        break
+                                                    }
+                                                    peersToAdd.append(peerId)
+                                                    existingPeerIds.insert(peerId)
+                                                    nextCount += 1
+                                                }
+
+                                                if peersToAdd.isEmpty {
+                                                    if !isPremium && data.includePeers.peers.count + peerIdsToAdd.filter({ !data.includePeers.peers.contains($0) && !data.includePeers.pinnedPeers.contains($0) }).count > Int(limit) {
+                                                        var replaceImpl: ((ViewController) -> Void)?
+                                                        let controller = PremiumLimitScreen(context: self.context, subject: .chatsPerFolder, count: Int32(data.includePeers.peers.count), action: {
+                                                            let controller = PremiumIntroScreen(context: self.context, source: .chatsPerFolder)
+                                                            replaceImpl?(controller)
+                                                            return true
+                                                        })
+                                                        replaceImpl = { [weak controller] c in
+                                                            controller?.replace(with: c)
+                                                        }
+                                                        self.push(controller)
+                                                    }
+                                                    self.donePressed()
+                                                    f(.dismissWithoutContent)
+                                                    return
+                                                }
+
+                                                let folderTitle = title
+                                                let _ = (self.context.engine.peers.updateChatListFiltersInteractively { filters in
+                                                    var filters = filters
+                                                    for i in 0 ..< filters.count {
+                                                        if filters[i].id == id, case let .filter(filterId, filterTitle, emoticon, filterData) = filters[i] {
+                                                            var updatedData = filterData
+                                                            for peerId in peersToAdd {
+                                                                let _ = updatedData.addIncludePeer(peerId: peerId)
+                                                            }
+                                                            filters[i] = .filter(id: filterId, title: filterTitle, emoticon: emoticon, data: updatedData)
+                                                            break
+                                                        }
+                                                    }
+                                                    return filters
+                                                }
+                                                |> mapToSignal { _ -> Signal<[EnginePeer], NoError> in
+                                                    return self.context.engine.data.get(EngineDataList(peersToAdd.map(TelegramEngine.EngineData.Item.Peer.Peer.init(id:))))
+                                                    |> map { peers in
+                                                        return peers.compactMap { $0 }
+                                                    }
+                                                }
+                                                |> deliverOnMainQueue).startStandalone(next: { [weak self] peers in
+                                                    guard let self else {
+                                                        return
+                                                    }
+
+                                                    if peers.count == 1, let peer = peers.first {
+                                                        self.present(UndoOverlayController(presentationData: self.presentationData, content: .chatAddedToFolder(context: self.context, chatTitle: peer.displayTitle(strings: self.presentationData.strings, displayOrder: self.presentationData.nameDisplayOrder), folderTitle: folderTitle.rawAttributedString), elevatedLayout: false, animateInAsReplacement: true, action: { _ in
+                                                            return false
+                                                        }), in: .current)
+                                                    } else if !peers.isEmpty {
+                                                        let toastTitle = self.presentationData.strings.ChatListFilter_ToastChatsAddedTitle(Int32(peers.count))
+                                                        self.present(UndoOverlayController(presentationData: self.presentationData, content: .universal(animation: "anim_add_to_folder", scale: 0.1, colors: ["__allcolors__": UIColor.white], title: toastTitle, text: folderTitle.text, customUndoText: nil, timeout: 3.0), elevatedLayout: false, animateInAsReplacement: true, action: { _ in
+                                                            return false
+                                                        }), in: .current)
+                                                    }
+
+                                                    self.donePressed()
+                                                    f(.dismissWithoutContent)
+                                                })
+                                                found = true
+                                                break
+                                            }
+
                                             let _ = (self.context.engine.peers.currentChatListFilters()
                                             |> deliverOnMainQueue).startStandalone(next: { [weak self] filters in
                                                 guard let self else {

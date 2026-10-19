@@ -689,12 +689,7 @@ extension ChatControllerImpl {
                     isPremiumRequiredForMessaging = .single(false)
                 }
                 
-                let adMessage: Signal<Message?, NoError>
-                if let adMessagesContext {
-                    adMessage = adMessagesContext.state |> map { $0.messages.first }
-                } else {
-                    adMessage = .single(nil)
-                }
+                let adMessage: Signal<Message?, NoError> = .single(nil)
                 
                 let displayedPeerVerification: Signal<Bool, NoError>
                 if let peerId = chatLocation.peerId {

@@ -127,6 +127,10 @@ open class TabBarControllerImpl: ViewController, TabBarController {
             }
         }
     }
+
+    public func setAccessoryItem(id: AnyHashable, title: String, iconName: String, action: @escaping () -> Void) {
+        self.tabBarControllerNode.updateAccessoryItem(id: id, title: title, iconName: iconName, action: action)
+    }
     
     private var debugTapCounter: (Double, Int) = (0.0, 0)
     

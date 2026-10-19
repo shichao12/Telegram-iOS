@@ -20,6 +20,25 @@ import ComponentDisplayAdapters
 import GlassControls
 import BundleIconComponent
 import MultilineTextComponent
+import ContextUI
+import ContextControllerImpl
+
+private final class BlacklistMenuReferenceContentSource: ContextReferenceContentSource {
+    private let sourceView: UIView
+
+    init(sourceView: UIView) {
+        self.sourceView = sourceView
+    }
+
+    func transitionInfo() -> ContextControllerReferenceViewInfo? {
+        return ContextControllerReferenceViewInfo(
+            referenceView: self.sourceView,
+            contentAreaInScreenSpace: UIScreen.main.bounds,
+            insets: UIEdgeInsets(top: -4.0, left: -4.0, bottom: -4.0, right: -4.0),
+            actionsPosition: .top
+        )
+    }
+}
 
 private enum SubscriberAction: Equatable, Hashable {
     case join
@@ -147,6 +166,7 @@ private let badgeFont = Font.regular(14.0)
 public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
     private let panelContainer = UIView()
     private let panel = ComponentView<Empty>()
+    private let blacklistMenuAnchorView = UIView()
     
     /*private let buttonBackgroundView: GlassBackgroundView
     private let button: HighlightableButton
@@ -177,15 +197,82 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
     
     public override init() {
         super.init()
-        
+        self.blacklistMenuAnchorView.isUserInteractionEnabled = false
         self.view.addSubview(self.panelContainer)
+        self.panelContainer.addSubview(self.blacklistMenuAnchorView)
     }
     
     deinit {
         self.actionDisposable.dispose()
         self.badgeDisposable.dispose()
     }
-    
+
+    private func presentBlacklistCategoryMenu() {
+        guard let context = self.context, self.presentationInterfaceState?.renderedPeer?.peerId != nil else {
+            return
+        }
+        let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+        let open: (MessageBlacklistCategory) -> Void = { [weak self] category in
+            self?.presentMessageBlacklistSettings(category: category)
+        }
+        let paste: (MessageBlacklistCategory) -> Void = { [weak self] category in
+            self?.quickPasteMessageBlacklist(category: category)
+        }
+        func item(title: String, category: MessageBlacklistCategory, iconName: String) -> ContextMenuItem {
+            return .custom(BlacklistMenuRowItem(title: title, iconName: iconName, category: category, open: open, paste: paste), false)
+        }
+        let items: [ContextMenuItem] = [
+            item(title: "全局关键词", category: .globalKeyword, iconName: "Chat/Context Menu/Restrict"),
+            item(title: "此频道关键词", category: .channelKeyword, iconName: "Chat/Context Menu/Restrict"),
+            item(title: "全局链接", category: .globalLink, iconName: "Chat/Context Menu/Link"),
+            item(title: "此频道链接", category: .channelLink, iconName: "Chat/Context Menu/Link")
+        ]
+        let menuController = makeContextController(
+            presentationData: presentationData,
+            source: .reference(BlacklistMenuReferenceContentSource(sourceView: self.blacklistMenuAnchorView)),
+            items: .single(ContextController.Items(content: .list(items))),
+            gesture: nil
+        )
+        self.interfaceInteraction?.presentGlobalOverlayController(menuController, nil)
+    }
+
+    private func presentMessageBlacklistSettings(category: MessageBlacklistCategory) {
+        guard let context = self.context, let peerId = self.presentationInterfaceState?.renderedPeer?.peerId, let controller = self.interfaceInteraction?.chatController() else {
+            return
+        }
+        let settingsController = messageBlacklistSettingsController(context: context, peerId: peerId, category: category)
+        controller.present(settingsController, in: .window(.root), with: ViewControllerPresentationArguments(presentationAnimation: .modalSheet))
+    }
+
+    private func quickPasteMessageBlacklist(category: MessageBlacklistCategory) {
+        guard let context = self.context, let peerId = self.presentationInterfaceState?.renderedPeer?.peerId else {
+            return
+        }
+        let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+        guard let value = clipboardBlacklistCandidate() else {
+            self.interfaceInteraction?.presentController(UndoOverlayController(presentationData: presentationData, content: .info(title: nil, text: "剪贴板为空，请先复制关键词或链接", timeout: 2.0, customUndoText: nil), elevatedLayout: false, animateInAsReplacement: false, action: { _ in false }), nil)
+            return
+        }
+        quickAddMessageBlacklistValue(context: context, peerId: peerId, category: category, value: value, completion: { [weak self] added, trimmed in
+            let scopeTitle: String
+            switch category {
+            case .globalKeyword, .globalLink:
+                scopeTitle = "全局"
+            case .channelKeyword, .channelLink:
+                scopeTitle = "此频道"
+            }
+            let kindTitle = category.isLink ? "链接" : "关键词"
+            let text: String
+            if added {
+                text = "已添加到\(scopeTitle)\(kindTitle)黑名单：\(trimmed)"
+            } else {
+                text = "已在黑名单中：\(trimmed)"
+            }
+            self?.interfaceInteraction?.presentController(UndoOverlayController(presentationData: presentationData, content: .succeed(text: text, timeout: 2.0, customUndoText: nil), elevatedLayout: false, animateInAsReplacement: false, action: { _ in false }), nil)
+        })
+    }
+
+
     override public func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if !self.bounds.contains(point) {
             return nil
@@ -430,17 +517,9 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
             centerAction = (title, isAccent)
         }
         
-        var displayGift = false
-        var displaySuggestPost = false
         var displayHelp = false
         
         if let peer = interfaceState.renderedPeer?.peer as? TelegramChannel {
-            if case .broadcast = peer.info, interfaceState.starGiftsAvailable {
-                displayGift = true
-            }
-            if case let .broadcast(broadcastInfo) = peer.info, broadcastInfo.flags.contains(.hasMonoforum) {
-                displaySuggestPost = true
-            }
             if peer.flags.contains(.isGigagroup), self.action == .muteNotifications || self.action == .unmuteNotifications {
                 displayHelp = true
             }
@@ -453,24 +532,13 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
         rightInset += compactBottomSideInset
         
         var leftPanelItems: [GlassControlGroupComponent.Item] = []
-        if displaySuggestPost {
-            leftPanelItems.append(GlassControlGroupComponent.Item(
-                id: "suggestPost",
-                content: .icon("Chat/Input/Accessory Panels/SuggestPost"),
-                action: { [weak self] in
-                    self?.suggestedPostPressed()
-                }
-            ))
-        }
-        if displayGift {
-            leftPanelItems.append(GlassControlGroupComponent.Item(
-                id: "gift",
-                content: .icon("Chat/Input/Accessory Panels/Gift"),
-                action: { [weak self] in
-                    self?.giftPressed()
-                }
-            ))
-        }
+        leftPanelItems.append(GlassControlGroupComponent.Item(
+            id: "keywordBlacklist",
+            content: .icon("Item List/Block"),
+            action: { [weak self] in
+                self?.presentBlacklistCategoryMenu()
+            }
+        ))
         if displayHelp {
             leftPanelItems.append(GlassControlGroupComponent.Item(
                 id: "help",
@@ -513,6 +581,7 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
         let panelHeight = defaultHeight(metrics: metrics)
         let _ = isFirstTime
         let panelFrame = CGRect(origin: CGPoint(x: leftInset, y: 0.0), size: CGSize(width: width - leftInset - rightInset, height: panelHeight))
+        transition.updateFrame(view: self.blacklistMenuAnchorView, frame: CGRect(x: 0.0, y: 0.0, width: min(52.0, panelFrame.width), height: panelHeight))
         
         let _ = self.panel.update(
             transition: ComponentTransition(transition),

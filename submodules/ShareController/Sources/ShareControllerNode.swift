@@ -6,9 +6,11 @@ import SwiftSignalKit
 import Postbox
 import TelegramCore
 import TelegramPresentationData
+import TelegramUIPreferences
 import AccountContext
 import TelegramIntents
 import ContextUI
+import UndoUI
 import ComponentFlow
 import MultilineTextComponent
 import TelegramStringFormatting
@@ -694,6 +696,8 @@ final class ShareControllerNode: ViewControllerTracingNode, ASScrollViewDelegate
             if let peer = peer.peer {
                 self.disabledPeerSelected?(peer)
             }
+        }, peerLongPressed: { [weak self] peer in
+            self?.presentPeerPinMenu(peer: peer)
         })
         
         self.backgroundColor = nil
@@ -1288,6 +1292,60 @@ final class ShareControllerNode: ViewControllerTracingNode, ASScrollViewDelegate
         self.cancel?()
     }
     
+    func updatePinnedPeerIds(_ peerIds: Set<EnginePeer.Id>) {
+        self.controllerInteraction?.pinnedPeerIds = peerIds
+    }
+
+    private func presentPeerPinMenu(peer: EngineRenderedPeer) {
+        guard peer.peerId != self.context?.accountPeerId else {
+            return
+        }
+        guard let appContext = self.context as? ShareControllerAppAccountContext else {
+            return
+        }
+        let peerId = peer.peerId
+        let peerTitle = peer.chatOrMonoforumMainPeer?.displayTitle(strings: self.presentationData.strings, displayOrder: self.presentationData.nameDisplayOrder) ?? peer.peer?.displayTitle(strings: self.presentationData.strings, displayOrder: self.presentationData.nameDisplayOrder) ?? ""
+        let _ = (appContext.context.engine.data.get(TelegramEngine.EngineData.Item.Configuration.ApplicationSpecificPreference(key: ApplicationSpecificPreferencesKeys.sharePinnedPeersSettings))
+        |> deliverOnMainQueue).startStandalone(next: { [weak self] entry in
+            guard let self else {
+                return
+            }
+            let settings = entry?.get(SharePinnedPeersSettings.self) ?? .defaultSettings
+            let isPinned = settings.contains(peerId: peerId)
+            let actionSheet = ActionSheetController(presentationData: self.presentationData)
+            var items: [ActionSheetItem] = []
+            if !peerTitle.isEmpty {
+                items.append(ActionSheetTextItem(title: peerTitle))
+            }
+            items.append(ActionSheetButtonItem(title: isPinned ? "取消置顶" : "置顶", color: .accent, action: { [weak self, weak actionSheet] in
+                actionSheet?.dismissAnimated()
+                guard let self, let appContext = self.context as? ShareControllerAppAccountContext else {
+                    return
+                }
+                let _ = appContext.context.engine.preferences.update(id: ApplicationSpecificPreferencesKeys.sharePinnedPeersSettings, { entry in
+                    var settings = entry?.get(SharePinnedPeersSettings.self) ?? .defaultSettings
+                    settings = settings.withToggled(peerId: peerId)
+                    return EnginePreferencesEntry(settings)
+                }).startStandalone()
+                if isPinned {
+                    self.controllerInteraction?.pinnedPeerIds.remove(peerId)
+                } else {
+                    self.controllerInteraction?.pinnedPeerIds.insert(peerId)
+                }
+                self.present?(UndoOverlayController(presentationData: self.presentationData, content: .succeed(text: isPinned ? "已取消置顶" : "已置顶", timeout: 2.0, customUndoText: nil), elevatedLayout: false, animateInAsReplacement: false, action: { _ in false }))
+            }))
+            actionSheet.setItemGroups([
+                ActionSheetItemGroup(items: items),
+                ActionSheetItemGroup(items: [
+                    ActionSheetButtonItem(title: self.presentationData.strings.Common_Cancel, color: .accent, font: .bold, action: { [weak actionSheet] in
+                        actionSheet?.dismissAnimated()
+                    })
+                ])
+            ])
+            self.present?(actionSheet)
+        })
+    }
+
     @objc func actionButtonPressed() {
         if self.controllerInteraction!.selectedPeers.isEmpty && self.presetText == nil {
             if let defaultAction = self.defaultAction {

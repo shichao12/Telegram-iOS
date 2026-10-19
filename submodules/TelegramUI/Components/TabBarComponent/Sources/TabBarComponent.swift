@@ -701,6 +701,10 @@ public final class TabBarComponent: Component {
                 unboundItemWidths.append(itemSize.width)
                 unboundItemWidthSum += itemSize.width
             }
+
+            if let overrideSelectedItemId = self.overrideSelectedItemId, !validIds.contains(overrideSelectedItemId) {
+                self.overrideSelectedItemId = nil
+            }
             
             let itemWidths: [CGFloat]
             let totalItemsWidth: CGFloat

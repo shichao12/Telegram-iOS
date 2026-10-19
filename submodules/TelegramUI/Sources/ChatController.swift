@@ -3246,6 +3246,11 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
             let message = urlData.message
             let progress = urlData.progress
             let forceExternal = urlData.external ?? false
+
+            if url == "tg-blacklist://reveal", let messageId = message?.id {
+                strongSelf.chatDisplayNode.historyNode.temporarilyRevealBlacklistMessage(messageId)
+                return
+            }
             
             var skipConcealedAlert = false
             if let author = message?.author, author.isVerified {

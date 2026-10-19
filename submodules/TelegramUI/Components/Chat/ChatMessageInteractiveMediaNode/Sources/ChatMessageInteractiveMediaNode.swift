@@ -943,7 +943,6 @@ public final class ChatMessageInteractiveMediaNode: ASDisplayNode, GalleryItemTr
                 }
             }
             
-            let hasSpoiler = message.attributes.contains(where: { $0 is MediaSpoilerMessageAttribute })
             var isExtendedMediaPreview = false
             var isInlinePlayableVideo = false
             var isSticker = false
@@ -2139,7 +2138,8 @@ public final class ChatMessageInteractiveMediaNode: ASDisplayNode, GalleryItemTr
                                 }
                             }
                             
-                            if message.attributes.contains(where: { $0 is MediaSpoilerMessageAttribute }), strongSelf.extendedMediaOverlayNode == nil {
+                            // Auto-reveal media spoilers: keep video/media visible without tap-to-reveal mosaic.
+                            if false, message.attributes.contains(where: { $0 is MediaSpoilerMessageAttribute }), strongSelf.extendedMediaOverlayNode == nil {
                                 strongSelf.internallyVisible = false
                             }
                                                         
@@ -2497,7 +2497,8 @@ public final class ChatMessageInteractiveMediaNode: ASDisplayNode, GalleryItemTr
                             
                             strongSelf.updateStatus(animated: synchronousLoads)
 
-                            strongSelf.pinchContainerNode.isPinchGestureEnabled = !isSecretMedia && !isExtendedMediaPreview && !hasSpoiler
+                            // Keep pinch available for spoiler media (auto-revealed).
+                            strongSelf.pinchContainerNode.isPinchGestureEnabled = !isSecretMedia && !isExtendedMediaPreview
                             
                             strongSelf.appliedHlsInlinePlaybackRange = hlsInlinePlaybackRange
                             
@@ -3075,14 +3076,13 @@ public final class ChatMessageInteractiveMediaNode: ASDisplayNode, GalleryItemTr
             }
             displaySpoiler = true
         } else if message.attributes.contains(where: { $0 is MediaSpoilerMessageAttribute }) {
-            displaySpoiler = true
+            // Auto-reveal media spoilers in chat (no mosaic / tap-to-reveal).
+            displaySpoiler = false
         } else if isSecretMedia {
             displaySpoiler = true
         } else if message.isSensitiveContent(platform: "ios") {
-            if !self.showSensitiveContent {
-                displaySpoiler = true
-                icon = .eye
-            }
+            // Always show sensitive content without eye-icon mosaic.
+            displaySpoiler = false
         }
         
         if displaySpoiler, let context = self.context {

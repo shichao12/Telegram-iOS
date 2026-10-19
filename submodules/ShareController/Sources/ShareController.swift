@@ -346,7 +346,7 @@ public final class ShareController: ViewController {
     private let fromForeignApp: Bool
     private let collectibleItemInfo: TelegramCollectibleItemInfo?
     
-    private let peers = Promise<([(peer: EngineRenderedPeer, presence: EnginePeer.Presence?, requiresPremiumForMessaging: Bool, requiresStars: Int64?)], EnginePeer)>()
+    private let peers = Promise<([(peer: EngineRenderedPeer, presence: EnginePeer.Presence?, requiresPremiumForMessaging: Bool, requiresStars: Int64?)], EnginePeer, Set<EnginePeer.Id>)>()
     private let peersDisposable = MetaDisposable()
     private let readyDisposable = MetaDisposable()
     private let accountActiveDisposable = MetaDisposable()
@@ -1212,6 +1212,7 @@ public final class ShareController: ViewController {
         self.peersDisposable.set((self.peers.get()
         |> deliverOnMainQueue).start(next: { [weak self] next in
             if let strongSelf = self {
+                strongSelf.controllerNode.updatePinnedPeerIds(next.2)
                 strongSelf.controllerNode.updatePeers(context: strongSelf.currentContext, switchableAccounts: strongSelf.switchableAccounts, peers: next.0, accountPeer: next.1, defaultAction: strongSelf.defaultAction)
             }
         }))
@@ -2482,20 +2483,36 @@ public final class ShareController: ViewController {
             return view.peer.flatMap(EnginePeer.init)
         }
         
+        let pinnedSettingsSignal: Signal<SharePinnedPeersSettings, NoError>
+        if let appAccount = account as? ShareControllerAppAccountContext {
+            pinnedSettingsSignal = appAccount.context.engine.data.subscribe(
+                TelegramEngine.EngineData.Item.Configuration.ApplicationSpecificPreference(key: ApplicationSpecificPreferencesKeys.sharePinnedPeersSettings)
+            )
+            |> map { entry -> SharePinnedPeersSettings in
+                return entry?.get(SharePinnedPeersSettings.self) ?? .defaultSettings
+            }
+            |> distinctUntilChanged
+        } else {
+            pinnedSettingsSignal = .single(.defaultSettings)
+        }
+
         self.peers.set(combineLatest(
             peer,
-            tailChatList |> take(1)
+            tailChatList |> take(1),
+            pinnedSettingsSignal
         )
-        |> mapToSignal { maybeAccountPeer, view -> Signal<([(peer: EngineRenderedPeer, presence: EnginePeer.Presence?, requiresPremiumForMessaging: Bool, requiresStars: Int64?)], EnginePeer), NoError> in
+        |> mapToSignal { maybeAccountPeer, view, pinnedSettings -> Signal<([(peer: EngineRenderedPeer, presence: EnginePeer.Presence?, requiresPremiumForMessaging: Bool, requiresStars: Int64?)], EnginePeer, Set<EnginePeer.Id>), NoError> in
             let accountPeer = maybeAccountPeer!
             
             var peers: [EngineRenderedPeer] = []
+            var existingPeerIds = Set<EnginePeer.Id>()
             var possiblePremiumRequiredPeers = Set<EnginePeer.Id>()
             for entry in view.0.entries.reversed() {
                 switch entry {
                 case let .MessageEntry(entryData):
                     if let peer = entryData.renderedPeer.peers[entryData.renderedPeer.peerId], peer.id != accountPeer.id, canSendMessagesToPeer(EnginePeer(peer)) {
                         peers.append(EngineRenderedPeer(entryData.renderedPeer))
+                        existingPeerIds.insert(peer.id)
                         if let user = peer as? TelegramUser, user.flags.contains(.requirePremium) || user.flags.contains(.requireStars) {
                             possiblePremiumRequiredPeers.insert(user.id)
                         } else if let channel = peer as? TelegramChannel, let _ = channel.sendPaidMessageStars {
@@ -2507,50 +2524,101 @@ public final class ShareController: ViewController {
                 }
             }
 
-            let peerPresencesKey = PostboxViewKey.peerPresences(peerIds: Set(peers.map(\.peerId)))
-            
-            var keys: [PostboxViewKey] = []
-            keys.append(peerPresencesKey)
-            
-            for id in possiblePremiumRequiredPeers {
-                keys.append(.peer(peerId: id, components: []))
-                keys.append(.cachedPeerData(peerId: id))
+            let pinnedPeerIds = pinnedSettings.enginePeerIds.filter { $0 != accountPeer.id }
+            let missingPinnedIds = pinnedPeerIds.filter { !existingPeerIds.contains($0) }
+
+            let loadMissingPinned: Signal<[EngineRenderedPeer], NoError>
+            if missingPinnedIds.isEmpty {
+                loadMissingPinned = .single([])
+            } else {
+                loadMissingPinned = account.stateManager.postbox.transaction { transaction -> [EngineRenderedPeer] in
+                    var result: [EngineRenderedPeer] = []
+                    for peerId in missingPinnedIds {
+                        if let peer = transaction.getPeer(peerId), canSendMessagesToPeer(EnginePeer(peer)) {
+                            result.append(EngineRenderedPeer(peer: EnginePeer(peer)))
+                        }
+                    }
+                    return result
+                }
             }
-            
-            return account.stateManager.postbox.combinedView(keys: keys)
-            |> map { views -> ([EnginePeer.Id: EnginePeer.Presence?], [EnginePeer.Id: Bool], [EnginePeer.Id: Int64]) in
-                var result: [EnginePeer.Id: EnginePeer.Presence?] = [:]
-                if let view = views.views[peerPresencesKey] as? PeerPresencesView {
-                    result = view.presences.mapValues { value -> EnginePeer.Presence? in
-                        return EnginePeer.Presence(value)
+
+            return loadMissingPinned
+            |> mapToSignal { missingPinnedPeers -> Signal<([(peer: EngineRenderedPeer, presence: EnginePeer.Presence?, requiresPremiumForMessaging: Bool, requiresStars: Int64?)], EnginePeer, Set<EnginePeer.Id>), NoError> in
+                var peers = peers
+                var existingPeerIds = existingPeerIds
+                for peer in missingPinnedPeers.reversed() {
+                    if !existingPeerIds.contains(peer.peerId) {
+                        peers.insert(peer, at: 0)
+                        existingPeerIds.insert(peer.peerId)
                     }
                 }
-                var requiresPremiumForMessaging: [EnginePeer.Id: Bool] = [:]
-                var requiresStars: [EnginePeer.Id: Int64] = [:]
-                for id in possiblePremiumRequiredPeers {
-                    if let view = views.views[.cachedPeerData(peerId: id)] as? CachedPeerDataView, let data = view.cachedPeerData as? CachedUserData {
-                        requiresPremiumForMessaging[id] = data.flags.contains(.premiumRequired)
-                        requiresStars[id] = data.sendPaidMessageStars?.value
-                    } else if let view = views.views[.peer(peerId: id, components: [])] as? PeerView, let channel = peerViewMainPeer(view) as? TelegramChannel {
-                        requiresStars[id] = channel.sendPaidMessageStars?.value
-                    } else {
-                        requiresPremiumForMessaging[id] = false
-                    }
-                }
-                return (result, requiresPremiumForMessaging, requiresStars)
-            }
-            |> map { presenceMap, requiresPremiumForMessaging, requiresStars -> ([(peer: EngineRenderedPeer, presence: EnginePeer.Presence?, requiresPremiumForMessaging: Bool, requiresStars: Int64?)], EnginePeer) in
-                var resultPeers: [(peer: EngineRenderedPeer, presence: EnginePeer.Presence?, requiresPremiumForMessaging: Bool, requiresStars: Int64?)] = []
+
+                // Keep pinned peers at the front, preserving relative pin order.
+                var pinnedFront: [EngineRenderedPeer] = []
+                var remaining: [EngineRenderedPeer] = []
+                let pinnedSet = Set(pinnedPeerIds)
+                var peerById: [EnginePeer.Id: EngineRenderedPeer] = [:]
                 for peer in peers {
-                    resultPeers.append((peer, presenceMap[peer.peerId].flatMap { $0 }, requiresPremiumForMessaging[peer.peerId] ?? false, requiresStars[peer.peerId]))
+                    peerById[peer.peerId] = peer
                 }
-                return (resultPeers, accountPeer)
+                for peerId in pinnedPeerIds {
+                    if let peer = peerById[peerId] {
+                        pinnedFront.append(peer)
+                    }
+                }
+                for peer in peers {
+                    if !pinnedSet.contains(peer.peerId) {
+                        remaining.append(peer)
+                    }
+                }
+                peers = pinnedFront + remaining
+
+                let peerPresencesKey = PostboxViewKey.peerPresences(peerIds: Set(peers.map(\.peerId)))
+
+                var keys: [PostboxViewKey] = []
+                keys.append(peerPresencesKey)
+
+                for id in possiblePremiumRequiredPeers {
+                    keys.append(.peer(peerId: id, components: []))
+                    keys.append(.cachedPeerData(peerId: id))
+                }
+
+                return account.stateManager.postbox.combinedView(keys: keys)
+                |> map { views -> ([EnginePeer.Id: EnginePeer.Presence?], [EnginePeer.Id: Bool], [EnginePeer.Id: Int64]) in
+                    var result: [EnginePeer.Id: EnginePeer.Presence?] = [:]
+                    if let view = views.views[peerPresencesKey] as? PeerPresencesView {
+                        result = view.presences.mapValues { value -> EnginePeer.Presence? in
+                            return EnginePeer.Presence(value)
+                        }
+                    }
+                    var requiresPremiumForMessaging: [EnginePeer.Id: Bool] = [:]
+                    var requiresStars: [EnginePeer.Id: Int64] = [:]
+                    for id in possiblePremiumRequiredPeers {
+                        if let view = views.views[.cachedPeerData(peerId: id)] as? CachedPeerDataView, let data = view.cachedPeerData as? CachedUserData {
+                            requiresPremiumForMessaging[id] = data.flags.contains(.premiumRequired)
+                            requiresStars[id] = data.sendPaidMessageStars?.value
+                        } else if let view = views.views[.peer(peerId: id, components: [])] as? PeerView, let channel = peerViewMainPeer(view) as? TelegramChannel {
+                            requiresStars[id] = channel.sendPaidMessageStars?.value
+                        } else {
+                            requiresPremiumForMessaging[id] = false
+                        }
+                    }
+                    return (result, requiresPremiumForMessaging, requiresStars)
+                }
+                |> map { presenceMap, requiresPremiumForMessaging, requiresStars -> ([(peer: EngineRenderedPeer, presence: EnginePeer.Presence?, requiresPremiumForMessaging: Bool, requiresStars: Int64?)], EnginePeer, Set<EnginePeer.Id>) in
+                    var resultPeers: [(peer: EngineRenderedPeer, presence: EnginePeer.Presence?, requiresPremiumForMessaging: Bool, requiresStars: Int64?)] = []
+                    for peer in peers {
+                        resultPeers.append((peer, presenceMap[peer.peerId].flatMap { $0 }, requiresPremiumForMessaging[peer.peerId] ?? false, requiresStars[peer.peerId]))
+                    }
+                    return (resultPeers, accountPeer, pinnedSet)
+                }
             }
         })
         var animatedIn = false
         self.peersDisposable.set((self.peers.get()
         |> deliverOnMainQueue).start(next: { [weak self] next in
             if let strongSelf = self {
+                strongSelf.controllerNode.updatePinnedPeerIds(next.2)
                 strongSelf.controllerNode.updatePeers(context: strongSelf.currentContext, switchableAccounts: strongSelf.switchableAccounts, peers: next.0, accountPeer: next.1, defaultAction: strongSelf.defaultAction)
                 
                 if animateIn && !animatedIn {

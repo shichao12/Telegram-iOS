@@ -15,6 +15,7 @@ final class ShareControllerInteraction {
     var foundPeers: [(peer: EngineRenderedPeer, requiresPremiumForMessaging: Bool)] = []
     var selectedPeerIds = Set<EnginePeer.Id>()
     var selectedPeers: [EngineRenderedPeer] = []
+    var pinnedPeerIds: Set<EnginePeer.Id> = Set()
     
     var selectedTopics: [EnginePeer.Id: (Int64, MessageHistoryThreadData?)] = [:]
     
@@ -22,12 +23,14 @@ final class ShareControllerInteraction {
     let selectTopic: (EngineRenderedPeer, Int64, MessageHistoryThreadData?) -> Void
     let shareStory: (() -> Void)?
     let disabledPeerSelected: (EngineRenderedPeer) -> Void
+    let peerLongPressed: (EngineRenderedPeer) -> Void
     
-    init(togglePeer: @escaping (EngineRenderedPeer, Bool) -> Void, selectTopic: @escaping (EngineRenderedPeer, Int64, MessageHistoryThreadData?) -> Void, shareStory: (() -> Void)?, disabledPeerSelected: @escaping (EngineRenderedPeer) -> Void) {
+    init(togglePeer: @escaping (EngineRenderedPeer, Bool) -> Void, selectTopic: @escaping (EngineRenderedPeer, Int64, MessageHistoryThreadData?) -> Void, shareStory: (() -> Void)?, disabledPeerSelected: @escaping (EngineRenderedPeer) -> Void, peerLongPressed: @escaping (EngineRenderedPeer) -> Void) {
         self.togglePeer = togglePeer
         self.selectTopic = selectTopic
         self.shareStory = shareStory
         self.disabledPeerSelected = disabledPeerSelected
+        self.peerLongPressed = peerLongPressed
     }
 }
 
@@ -193,6 +196,14 @@ final class ShareControllerPeerGridItemNode: GridItemNode {
                         strongSelf.controllerInteraction?.shareStory?()
                     }
                 }
+            }
+        }
+        self.peerNode.contextAction = { [weak self] _, _, _ in
+            guard let strongSelf = self else {
+                return
+            }
+            if let (_, _, _, _, maybeItem, _) = strongSelf.currentState, let item = maybeItem, case let .peer(peer, _, _, _, _, _) = item, peer.peers[peer.peerId] != nil {
+                strongSelf.controllerInteraction?.peerLongPressed(peer)
             }
         }
         self.addSubnode(self.peerNode)

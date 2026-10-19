@@ -1931,7 +1931,13 @@ public final class ChatListNode: ListViewImpl {
         let chatListViewUpdate = self.chatListLocation.get()
         |> distinctUntilChanged
         |> mapToSignal { listLocation -> Signal<(ChatListNodeViewUpdate, ChatListFilter?), NoError> in
-            return chatListViewForLocation(chatListLocation: location, location: listLocation, account: context.account, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer)
+            let excludeFolderChatsFromAllChats: Bool
+            if case .chatList = mode, location == .chatList(groupId: .root), chatListFilter == nil {
+                excludeFolderChatsFromAllChats = true
+            } else {
+                excludeFolderChatsFromAllChats = false
+            }
+            return chatListViewForLocation(chatListLocation: location, location: listLocation, account: context.account, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer, excludeFolderChatsFromAllChats: excludeFolderChatsFromAllChats)
             |> map { update in
                 return (update, listLocation.filter)
             }
@@ -3898,7 +3904,13 @@ public final class ChatListNode: ListViewImpl {
                         shouldLoadCanMessagePeer = false
                     }
                     
-                    let _ = (chatListViewForLocation(chatListLocation: .chatList(groupId: groupId), location: .initial(count: 10, filter: filter), account: self.context.account, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer)
+                    let excludeFolderChatsFromAllChats: Bool
+                    if case .chatList = self.mode, groupId == .root, filter == nil {
+                        excludeFolderChatsFromAllChats = true
+                    } else {
+                        excludeFolderChatsFromAllChats = false
+                    }
+                    let _ = (chatListViewForLocation(chatListLocation: .chatList(groupId: groupId), location: .initial(count: 10, filter: filter), account: self.context.account, shouldLoadCanMessagePeer: shouldLoadCanMessagePeer, excludeFolderChatsFromAllChats: excludeFolderChatsFromAllChats)
                     |> take(1)
                     |> deliverOnMainQueue).startStandalone(next: { update in
                         let items = update.list.items
