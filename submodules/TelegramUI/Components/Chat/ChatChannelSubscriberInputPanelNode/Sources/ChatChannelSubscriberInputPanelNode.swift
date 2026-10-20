@@ -167,6 +167,12 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
     private let panelContainer = UIView()
     private let panel = ComponentView<Empty>()
     private let blacklistMenuAnchorView = UIView()
+
+    public var blacklistButtonFrame: CGRect? {
+        guard let panelView = self.panel.view as? GlassControlPanelComponent.View,
+              let itemView = panelView.leftItemView?.itemView(id: AnyHashable("keywordBlacklist")) else { return nil }
+        return itemView.convert(itemView.bounds, to: self.view)
+    }
     
     /*private let buttonBackgroundView: GlassBackgroundView
     private let button: HighlightableButton

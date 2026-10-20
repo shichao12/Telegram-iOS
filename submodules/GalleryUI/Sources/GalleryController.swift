@@ -711,6 +711,48 @@ public class GalleryController: ViewController, StandalonePresentableController,
         return self.displayNode as! GalleryControllerNode
     }
     
+    var rewatchReturnAction: (() -> Void)?
+    var rewatchPictureInPictureAction: (() -> Void)?
+    private var rewatchBackgroundObserver: NSObjectProtocol?
+
+    @objc func returnFromRewatch() { self.dismiss(forceAway: true) }
+
+    private func finishRewatch() {
+        let node = self.galleryNode.pager.centralItemNode() as? UniversalVideoGalleryItemNode
+        node?.flushRewatchProgress()
+        node?.suspendForRewatch()
+    }
+
+    private func dismissGalleryPresentation() {
+        self.finishRewatch()
+        let action = self.rewatchReturnAction
+        self.rewatchReturnAction = nil
+        if let presenter = self.presentingViewController {
+            presenter.dismiss(animated: false, completion: action)
+        } else { action?() }
+    }
+
+    func toggleVideoRewatch() {
+        guard let node = self.galleryNode.pager.centralItemNode() as? UniversalVideoGalleryItemNode,
+              let record = node.rewatchRecord() else { return }
+        let store = VideoRewatch.store(context: self.context)
+        let wasSaved = store.record(key: record.key) != nil
+        if store.toggle(record) {
+            let presentationData = self.presentationData
+            self.present(UndoOverlayController(presentationData: presentationData, content: .info(title: nil, text: wasSaved ? "已取消收藏" : "已加入收藏回看", timeout: 2.0, customUndoText: nil), elevatedLayout: false, action: { _ in false }), in: .current)
+        } else {
+            let alert = UIAlertController(title: "收藏回看", message: "无法保存收藏，请稍后重试。", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "好", style: .default))
+            self.present(alert, animated: true)
+        }
+    }
+
+    func openVideoRewatch() {
+        let node = self.galleryNode.pager.centralItemNode() as? UniversalVideoGalleryItemNode
+        node?.suspendForRewatch()
+        VideoRewatch.present(context: self.context, from: self, baseNavigationController: self.baseNavigationController, onReturn: { [weak node] in node?.resumeFromRewatch() }, onPictureInPicture: { [weak node] in node?.resumeFromRewatch(restorePlayback: false) })
+    }
+
     private let context: AccountContext
     private var presentationData: PresentationData
     private let source: GalleryControllerItemSource
@@ -1104,14 +1146,8 @@ public class GalleryController: ViewController, StandalonePresentableController,
         }))
         
         self.centralItemAttributesDisposable.add(combineLatest(self.centralItemRightBarButtonItem.get(), self.centralItemRightBarButtonItems.get()).start(next: { [weak self] rightBarButtonItem, rightBarButtonItems in
-            if let rightBarButtonItem = rightBarButtonItem {
-                self?.navigationItem.rightBarButtonItem = rightBarButtonItem
-            } else if let rightBarButtonItems = rightBarButtonItems {
-                self?.navigationItem.rightBarButtonItems = rightBarButtonItems
-            } else {
-                self?.navigationItem.rightBarButtonItem = nil
-                self?.navigationItem.rightBarButtonItems = nil
-            }
+            guard let self else { return }
+            self.navigationItem.rightBarButtonItems = rightBarButtonItem.map { [$0] } ?? rightBarButtonItems ?? []
         }))
         
         self.centralItemAttributesDisposable.add(self.centralItemFooterContentNode.get().start(next: { [weak self] footerContentNode, overlayContentNode in
@@ -1471,6 +1507,7 @@ public class GalleryController: ViewController, StandalonePresentableController,
         }
         self.updateVisibleDisposable.dispose()
         self.screenCaptureEventsDisposable?.dispose()
+        if let observer = self.rewatchBackgroundObserver { NotificationCenter.default.removeObserver(observer) }
     }
     
     @objc private func donePressed() {
@@ -1484,6 +1521,7 @@ public class GalleryController: ViewController, StandalonePresentableController,
     }
     
     func dismiss(forceAway: Bool) {
+        self.finishRewatch()
         var animatedOutNode = true
         var animatedOutInterface = false
         
@@ -1495,7 +1533,7 @@ public class GalleryController: ViewController, StandalonePresentableController,
             if animatedOutNode && animatedOutInterface {
                 self?.actionInteraction?.updateCanReadHistory(true)
                 self?._hiddenMedia.set(.single(nil))
-                self?.presentingViewController?.dismiss(animated: false, completion: nil)
+                self?.dismissGalleryPresentation()
             }
         }
         
@@ -1560,6 +1598,9 @@ public class GalleryController: ViewController, StandalonePresentableController,
         let disableTapNavigation = !(self.context.sharedContext.currentMediaDisplaySettings.with { $0 }.showNextMediaOnTap)
         self.displayNode = GalleryControllerNode(context: self.context, controllerInteraction: controllerInteraction, titleView: titleView, disableTapNavigation: disableTapNavigation)
         self.displayNodeDidLoad()
+        self.rewatchBackgroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            (self?.galleryNode.pager.centralItemNode() as? UniversalVideoGalleryItemNode)?.flushRewatchProgress()
+        }
         
         self.galleryNode.statusBar = self.statusBar
         self.galleryNode.navigationBar = self.navigationBar
@@ -1577,9 +1618,10 @@ public class GalleryController: ViewController, StandalonePresentableController,
             return nil
         }
         self.galleryNode.dismiss = { [weak self] in
+            self?.finishRewatch()
             self?.actionInteraction?.updateCanReadHistory(true)
             self?._hiddenMedia.set(.single(nil))
-            self?.presentingViewController?.dismiss(animated: false, completion: nil)
+            self?.dismissGalleryPresentation()
         }
         
         self.galleryNode.beginCustomDismiss = { [weak self] animationType in
@@ -1609,6 +1651,7 @@ public class GalleryController: ViewController, StandalonePresentableController,
         }
         
         self.galleryNode.completeCustomDismiss = { [weak self] isPictureInPicture in
+            if !isPictureInPicture { self?.finishRewatch() }
             guard let self else {
                 return
             }
@@ -1626,7 +1669,16 @@ public class GalleryController: ViewController, StandalonePresentableController,
                 self._hiddenMedia.set(.single(nil))
             }
             
-            self.presentingViewController?.dismiss(animated: false, completion: nil)
+            if isPictureInPicture {
+                // The PiP video keeps playing. Release the original gallery's suspension
+                // without seeking it or restarting its audio.
+                self.rewatchReturnAction = nil
+                let action = self.rewatchPictureInPictureAction
+                self.rewatchPictureInPictureAction = nil
+                self.presentingViewController?.dismiss(animated: false, completion: action)
+            } else {
+                self.dismissGalleryPresentation()
+            }
         }
         
         self.galleryNode.controlsVisibilityChanged = { [weak self] visible in
@@ -1960,6 +2012,7 @@ public class GalleryController: ViewController, StandalonePresentableController,
     override public func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         
+        (self.galleryNode.pager.centralItemNode() as? UniversalVideoGalleryItemNode)?.flushRewatchProgress()
         self.accountInUseDisposable.set(nil)
     }
     

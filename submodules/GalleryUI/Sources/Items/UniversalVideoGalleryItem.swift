@@ -963,6 +963,62 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
     private let playbackRatePromise = ValuePromise<Double>()
     private let videoQualityPromise = ValuePromise<UniversalVideoContentVideoQuality>()
     
+    private var rewatchSuspended = false
+    private var rewatchWasPlaying = false
+    private var rewatchPosition: Double = 0.0
+    private var rewatchTouched = false
+
+    private func rewatchTimestamp(_ status: MediaPlayerStatus) -> Double {
+        var timestamp = status.timestamp
+        if status.status == .playing && status.generationTimestamp > 0.0 {
+            timestamp += max(0.0, CACurrentMediaTime() - status.generationTimestamp) * status.baseRate
+        }
+        return max(0.0, min(timestamp, status.duration))
+    }
+
+    func rewatchRecord() -> VideoRewatchRecord? {
+        guard let item = self.item, !item.isSecret,
+              let contentInfo = item.contentInfo, case let .message(message, subject) = contentInfo,
+              message.id.peerId.namespace != Namespaces.Peer.SecretChat, !message.containsSecretMedia,
+              let file = selectedMediaForMessage(message: message, mediaSubject: subject) as? TelegramMediaFile,
+              file.isVideo, !file.isAnimated, !file.isInstantVideo else { return nil }
+        return VideoRewatch.record(message: message, file: file, subject: subject, position: self.playerStatusValue.map(self.rewatchTimestamp) ?? 0.0, duration: self.playerStatusValue?.duration ?? Double(item.content.duration))
+    }
+
+    func suspendForRewatch() {
+        guard !self.rewatchSuspended else { return }
+        self.flushRewatchProgress()
+        self.rewatchSuspended = true
+        self.rewatchWasPlaying = self.playerStatusValue?.status == .playing
+        self.rewatchPosition = self.playerStatusValue.map(self.rewatchTimestamp) ?? 0.0
+        self.videoNode?.pause()
+    }
+
+    func resumeFromRewatch(restorePlayback: Bool = true) {
+        guard self.rewatchSuspended else { return }
+        self.rewatchSuspended = false
+        guard restorePlayback, self.isCentral == true else { return }
+        self.videoNode?.seek(self.rewatchPosition)
+        if self.rewatchWasPlaying { self.videoNode?.play() }
+    }
+
+    func flushRewatchProgress() {
+        guard let item = self.item else { return }
+        if let status = self.playerStatusValue { self.updateRewatchProgress(status: status) }
+        if let record = self.rewatchRecord(), VideoRewatch.store(context: item.context).record(key: record.key) != nil {
+            VideoRewatch.store(context: item.context).flush()
+        }
+    }
+
+    private func updateRewatchProgress(status: MediaPlayerStatus, completed: Bool = false) {
+        guard self.isCentral == true, !self.rewatchSuspended,
+              let item = self.item, let record = self.rewatchRecord() else { return }
+        let store = VideoRewatch.store(context: item.context)
+        guard store.record(key: record.key) != nil else { return }
+        store.update(key: record.key, position: self.rewatchTimestamp(status), duration: status.duration, completed: completed, touch: !self.rewatchTouched && status.status == .playing)
+        if status.status == .playing { self.rewatchTouched = true }
+    }
+
     private var playerStatusValue: MediaPlayerStatus?
     private let statusDisposable = MetaDisposable()
     
@@ -1036,6 +1092,7 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
 
         self.clipsToBounds = true
         
+        self.footerContentNode.videoRewatchRecord = { [weak self] in self?.rewatchRecord() }
         self.footerContentNode.shareMediaParameters = { [weak self] in
             guard let self, let playerStatusValue = self.playerStatusValue else {
                 return nil
@@ -1536,7 +1593,7 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
                 if let strongSelf = self {
                     strongSelf.updateDisplayPlaceholder(!value)
                     
-                    if strongSelf.playOnContentOwnership {
+                    if strongSelf.playOnContentOwnership && !strongSelf.rewatchSuspended {
                         strongSelf.playOnContentOwnership = false
                         strongSelf.initiallyActivated = true
                         strongSelf.skipInitialPause = true
@@ -1728,6 +1785,7 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
             |> deliverOnMainQueue).start(next: { [weak self] value, fetchStatus in
                 if let strongSelf = self {
                     strongSelf.playerStatusValue = value
+                    if let value { strongSelf.updateRewatchProgress(status: value) }
                     
                     var initialBuffering = false
                     var isPlaying = false
@@ -1995,6 +2053,10 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
             videoNode.playbackCompleted = { [weak self, weak videoNode] in
                 Queue.mainQueue().async {
                     item.playbackCompleted()
+                    if let self, let status = self.playerStatusValue {
+                        self.updateRewatchProgress(status: status, completed: true)
+                        if let item = self.item { VideoRewatch.store(context: item.context).flush() }
+                    }
                                         
                     if let strongSelf = self, !isAnimated {
                         if #available(iOS 15.0, *) {
@@ -2234,7 +2296,10 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
         super.centralityUpdated(isCentral: isCentral)
         
         if self.isCentral != isCentral {
+            if !isCentral { self.flushRewatchProgress() }
+            self.rewatchTouched = false
             self.isCentral = isCentral
+            if self.rewatchSuspended { return }
             
             if let videoNode = self.videoNode {
                 if isCentral {
@@ -2296,6 +2361,11 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
             self._isVisible = isVisible
             
             if let item = self.item, let videoNode = self.videoNode {
+                if self.rewatchSuspended {
+                    videoNode.canAttachContent = isVisible
+                    self.updateDisplayPlaceholder()
+                    return
+                }
                 if hadPreviousValue {
                     videoNode.canAttachContent = isVisible
                     if isVisible {
@@ -2346,7 +2416,7 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
     }
     
     override func activateAsInitial() {
-        if let videoNode = self.videoNode, self.isCentral == true, !self.initiallyActivated {
+        if let videoNode = self.videoNode, self.isCentral == true, !self.initiallyActivated, !self.rewatchSuspended {
             self.initiallyActivated = true
 
             var isAnimated = false

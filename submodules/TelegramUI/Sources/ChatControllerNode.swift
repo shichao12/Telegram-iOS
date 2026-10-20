@@ -271,6 +271,7 @@ class ChatControllerNode: ASDisplayNode, ASScrollViewDelegate {
     private var topBackgroundEdgeEffectNode: WallpaperEdgeEffectNode?
     private var bottomBackgroundEdgeEffectNode: WallpaperEdgeEffectNode?
     
+    var updateVideoRewatchLayout: ((ContainedViewLayoutTransition) -> Void)?
     private(set) var inputPanelNode: ChatInputPanelNode?
     private weak var currentDismissedInputPanelNode: ChatInputPanelNode?
     private(set) var secondaryInputPanelNode: ChatInputPanelNode?
@@ -3616,6 +3617,7 @@ class ChatControllerNode: ASDisplayNode, ASScrollViewDelegate {
             contextTransitionContainer.frame = self.view.convert(self.frameForVisibleArea(), to: self.contentContainerNode.contentNode.view)
         }
 
+        self.updateVideoRewatchLayout?(transition)
         //self.notifyTransitionCompletionListeners(transition: transition)
     }
     

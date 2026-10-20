@@ -154,6 +154,15 @@ final class ChatItemGalleryFooterContentNode: GalleryFooterContentNode, ASScroll
     private var buttonNode: SolidRoundedButtonNode?
     private var buttonIconNode: ASImageNode?
     private let buttonPanel = ComponentView<Empty>()
+    var videoRewatchRecord: (() -> VideoRewatchRecord?)?
+    private var videoRewatchObserver: NSObjectProtocol?
+    private let videoRewatchLongPress = UILongPressGestureRecognizer()
+
+    @objc private func videoRewatchLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        if gesture.state == .began {
+            (self.controllerInteraction?.controller() as? GalleryController)?.openVideoRewatch()
+        }
+    }
     
     private var textSelectionNode: TextSelectionNode?
     
@@ -432,6 +441,13 @@ final class ChatItemGalleryFooterContentNode: GalleryFooterContentNode, ASScroll
         self.animationRenderer = context.animationRenderer
         
         super.init()
+
+        self.videoRewatchLongPress.minimumPressDuration = 0.5
+        self.videoRewatchLongPress.cancelsTouchesInView = true
+        self.videoRewatchLongPress.addTarget(self, action: #selector(self.videoRewatchLongPressed(_:)))
+        self.videoRewatchObserver = NotificationCenter.default.addObserver(forName: VideoRewatchStore.changed, object: VideoRewatch.store(context: context), queue: .main) { [weak self] _ in
+            self?.requestLayout?(.immediate)
+        }
         
         self.addSubnode(self.contentNode)
         
@@ -677,6 +693,7 @@ final class ChatItemGalleryFooterContentNode: GalleryFooterContentNode, ASScroll
     }
     
     deinit {
+        if let observer = self.videoRewatchObserver { NotificationCenter.default.removeObserver(observer) }
         self.messageContextDisposable.dispose()
         self.codeHighlightState?.disposable.dispose()
     }
@@ -1348,6 +1365,16 @@ final class ChatItemGalleryFooterContentNode: GalleryFooterContentNode, ASScroll
                     }
                 ))
             }
+            if let record = self.videoRewatchRecord?() {
+                let saved = VideoRewatch.store(context: self.context).record(key: record.key) != nil
+                leftControlItems.append(GlassControlGroupComponent.Item(
+                    id: AnyHashable("videoRewatch"),
+                    content: .customIcon(id: AnyHashable("videoRewatch"), component: AnyComponent(VideoRewatchIconComponent(saved: saved)), insets: .zero),
+                    action: { [weak self] in
+                        (self?.controllerInteraction?.controller() as? GalleryController)?.toggleVideoRewatch()
+                    }
+                ))
+            }
             if buttonsState.displayPictureInPictureButton {
                 centerControlItems.append(GlassControlGroupComponent.Item(
                     id: AnyHashable("pip"),
@@ -1474,6 +1501,17 @@ final class ChatItemGalleryFooterContentNode: GalleryFooterContentNode, ASScroll
                 self.contentNode.view.addSubview(buttonPanelView)
             }
             ComponentTransition(transition).setFrame(view: buttonPanelView, frame: buttonPanelFrame)
+            if let panelView = buttonPanelView as? GlassControlPanelComponent.View,
+               let itemView = panelView.leftItemView?.itemView(id: AnyHashable("videoRewatch")) {
+                if self.videoRewatchLongPress.view !== itemView {
+                    itemView.addGestureRecognizer(self.videoRewatchLongPress)
+                }
+                let record = self.videoRewatchRecord?()
+                let saved = record.map { VideoRewatch.store(context: self.context).record(key: $0.key) != nil } ?? false
+                itemView.accessibilityLabel = saved ? "取消收藏视频" : "收藏视频"
+                itemView.accessibilityHint = "轻点收藏或取消收藏，长按打开收藏回看"
+                itemView.accessibilityTraits = .button
+            }
         }
 
         if let image = self.backwardButton.backgroundIconNode.image {
@@ -2658,5 +2696,27 @@ final class SettingsNavigationIconComponent: Component {
     
     func update(view: View, availableSize: CGSize, state: State, environment: Environment<Empty>, transition: ComponentTransition) -> CGSize {
         return view.update(component: self, availableSize: availableSize, state: state, environment: environment, transition: transition)
+    }
+}
+
+private final class VideoRewatchIconComponent: Component {
+    let saved: Bool
+
+    init(saved: Bool) { self.saved = saved }
+
+    static func ==(lhs: VideoRewatchIconComponent, rhs: VideoRewatchIconComponent) -> Bool {
+        return lhs.saved == rhs.saved
+    }
+
+    func makeView() -> UIImageView {
+        let view = UIImageView()
+        view.tintColor = .white
+        view.contentMode = .scaleAspectFit
+        return view
+    }
+
+    func update(view: UIImageView, availableSize: CGSize, state: EmptyComponentState, environment: Environment<Empty>, transition: ComponentTransition) -> CGSize {
+        view.image = UIImage(systemName: self.saved ? "star.fill" : "star", withConfiguration: UIImage.SymbolConfiguration(pointSize: 23.0, weight: .regular))
+        return CGSize(width: 28.0, height: 28.0)
     }
 }

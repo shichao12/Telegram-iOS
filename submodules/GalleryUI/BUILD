@@ -11,6 +11,7 @@ swift_library(
     ],
     deps = [
         "//submodules/UrlWhitelist",
+        "//submodules/TinyThumbnail",
         "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
         "//submodules/LottieSettings:LottieSettings",
         "//submodules/AsyncDisplayKit:AsyncDisplayKit",

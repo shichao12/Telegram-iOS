@@ -69,6 +69,7 @@ import AttachmentUI
 import AttachmentTextInputPanelNode
 import MediaPickerUI
 import ChatPresentationInterfaceState
+import ChatChannelSubscriberInputPanelNode
 import Pasteboard
 import ChatSendMessageActionUI
 import ChatTextLinkEditUI
@@ -240,6 +241,7 @@ struct ScrolledToMessageId: Equatable {
 }
 
 public final class ChatControllerImpl: TelegramBaseController, ChatController, GalleryHiddenMediaTarget, UIDropInteractionDelegate {    
+    private var videoRewatchButton: VideoRewatchButton?
     var validLayout: ContainerViewLayout?
     
     public weak var parentController: ViewController?
@@ -7849,6 +7851,21 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     override public func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         
+        if self.videoRewatchButton == nil, !self.isPreviewingMode {
+            let button = VideoRewatchButton(context: self.context)
+            button.open = { [weak self] in
+                guard let self else { return }
+                self.context.sharedContext.mediaManager.playlistControl(.playback(.pause), type: nil)
+                VideoRewatch.present(context: self.context, from: self, baseNavigationController: self.effectiveNavigationController)
+            }
+            self.videoRewatchButton = button
+            self.displayNode.view.addSubview(button)
+            self.chatDisplayNode.updateVideoRewatchLayout = { [weak self] transition in
+                guard let self, let layout = self.validLayout else { return }
+                self.layoutVideoRewatchButton(layout, transition: transition)
+            }
+            if let layout = self.validLayout { self.layoutVideoRewatchButton(layout, transition: .immediate) }
+        }
         self.didAppear = true
         
         self.chatDisplayNode.historyNode.experimentalSnapScrollToItem = false
@@ -8415,6 +8432,19 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
         self.chatDisplayNode.isScrollingLockedAtTop = isScrollingLockedAtTop
     }
     
+    private func layoutVideoRewatchButton(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
+        guard let button = self.videoRewatchButton else { return }
+        let panel = self.chatDisplayNode.inputPanelNode
+        let panelFrame = panel.map { $0.view.convert($0.view.bounds, to: self.displayNode.view) }
+        var centerX = layout.safeInsets.left + 30.0
+        if let panel = panel as? ChatChannelSubscriberInputPanelNode, let frame = panel.blacklistButtonFrame {
+            centerX = panel.view.convert(frame, to: self.displayNode.view).midX
+        }
+        let panelTop = panelFrame?.minY ?? (layout.size.height - layout.insets(options: [.input]).bottom - 44.0)
+        transition.updateFrame(view: button, frame: CGRect(x: centerX - 22.0, y: max(self.navigationLayout(layout: layout).navigationFrame.maxY + 8.0, panelTop - 52.0), width: 44.0, height: 44.0))
+        self.displayNode.view.bringSubviewToFront(button)
+    }
+
     override public func containerLayoutUpdated(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
         self.suspendNavigationBarLayout = true
         super.containerLayoutUpdated(layout, transition: transition)
