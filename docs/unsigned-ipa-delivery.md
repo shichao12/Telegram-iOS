@@ -58,3 +58,21 @@ without toggling; chat entrance aligns above blacklist; controls hide with the p
 toolbar; bookmark A, scroll to B, open Rewatch, resume A, return to B;
 close the list by button and swipe; remove the last bookmark; restart and resume;
 try a missing message; check no overlapping audio and portrait/landscape placement.
+
+
+## Download speed display validation
+
+Added 2026-10-21: show the current account's combined media download speed in
+small text below the mute/unmute title. Refresh about once per second while the
+panel is on screen and the app is active; idle reads `↓ 0 KB/s`.
+
+```sh
+xcrun swiftc submodules/TelegramUI/Components/Chat/ChatChannelSubscriberInputPanelNode/Sources/DownloadSpeedEstimator.swift \
+  submodules/TelegramUI/Components/Chat/ChatChannelSubscriberInputPanelNode/Tests/DownloadSpeedEstimatorTests.swift \
+  -o /tmp/tg-download-speed-tests
+/tmp/tg-download-speed-tests
+```
+
+On a signed device, verify: speed changes during media downloads and returns to zero
+when idle; mute/unmute still works; title and speed fit in portrait/landscape and both
+themes; returning from the background starts with a fresh speed baseline.

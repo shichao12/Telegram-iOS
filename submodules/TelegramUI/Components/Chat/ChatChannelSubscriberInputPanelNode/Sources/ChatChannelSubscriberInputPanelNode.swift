@@ -195,6 +195,13 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
     
     private let actionDisposable = MetaDisposable()
     private let badgeDisposable = MetaDisposable()
+    private let downloadSpeedDisposable = MetaDisposable()
+    private var downloadSpeedEstimator = DownloadSpeedEstimator()
+    private var downloadSpeedText = "↓ 0 KB/s"
+    private var downloadSpeedMonitoring = false
+    private var panelInHierarchy = false
+    private var applicationActive = UIApplication.shared.applicationState == .active
+    private var applicationObservers: [NSObjectProtocol] = []
     private var isJoining: Bool = false
     
     private var presentationInterfaceState: ChatPresentationInterfaceState?
@@ -206,11 +213,58 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
         self.blacklistMenuAnchorView.isUserInteractionEnabled = false
         self.view.addSubview(self.panelContainer)
         self.panelContainer.addSubview(self.blacklistMenuAnchorView)
+        self.applicationObservers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.applicationActive = true
+            self?.updateDownloadSpeedMonitoring()
+        })
+        self.applicationObservers.append(NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.applicationActive = false
+            self?.updateDownloadSpeedMonitoring()
+        })
     }
     
     deinit {
         self.actionDisposable.dispose()
         self.badgeDisposable.dispose()
+        self.downloadSpeedDisposable.dispose()
+        for observer in self.applicationObservers { NotificationCenter.default.removeObserver(observer) }
+    }
+
+
+    override public func didEnterHierarchy() {
+        super.didEnterHierarchy()
+        self.panelInHierarchy = true
+        self.updateDownloadSpeedMonitoring()
+    }
+
+    override public func didExitHierarchy() {
+        super.didExitHierarchy()
+        self.panelInHierarchy = false
+        self.updateDownloadSpeedMonitoring()
+    }
+
+    private func updateDownloadSpeedMonitoring() {
+        let shouldMonitor = self.panelInHierarchy && self.applicationActive && (self.action == .muteNotifications || self.action == .unmuteNotifications)
+        guard shouldMonitor != self.downloadSpeedMonitoring else { return }
+        self.downloadSpeedMonitoring = shouldMonitor
+        self.downloadSpeedDisposable.set(nil)
+        self.downloadSpeedEstimator = DownloadSpeedEstimator()
+        guard shouldMonitor, let context = self.context else { return }
+        // Read only the current snapshot; resubscribe once per second while visible.
+        let sample = accountNetworkUsageStats(account: context.account, reset: []) |> take(1)
+        self.downloadSpeedDisposable.set(((sample |> then(Signal<NetworkUsageStats, NoError>.complete() |> delay(1.0, queue: Queue.concurrentDefaultQueue()))) |> restart |> deliverOnMainQueue).start(next: { [weak self] stats in
+            guard let self, self.downloadSpeedMonitoring else { return }
+            // Media downloads only: exclude outgoing traffic, calls and service messages.
+            let entries = [stats.image, stats.video, stats.audio, stats.file, stats.sticker, stats.voiceMessage]
+            let counters = entries.flatMap { [$0.wifi.incoming, $0.cellular.incoming] }
+            let speed = self.downloadSpeedEstimator.sample(counters: counters, time: ProcessInfo.processInfo.systemUptime, resetTokens: [stats.resetWifiTimestamp, stats.resetCellularTimestamp])
+            let text = DownloadSpeedEstimator.text(bytesPerSecond: speed)
+            guard text != self.downloadSpeedText else { return }
+            self.downloadSpeedText = text
+            if let (width, leftInset, rightInset, bottomInset, additionalSideInsets, maxHeight, maxOverlayHeight, isSecondary, metrics, deviceMetrics) = self.layoutData, let interfaceState = self.presentationInterfaceState {
+                let _ = self.updateLayout(width: width, leftInset: leftInset, rightInset: rightInset, bottomInset: bottomInset, additionalSideInsets: additionalSideInsets, maxHeight: maxHeight, maxOverlayHeight: maxOverlayHeight, isSecondary: isSecondary, transition: .immediate, interfaceState: interfaceState, metrics: metrics, deviceMetrics: deviceMetrics, force: true)
+            }
+        }))
     }
 
     private func presentBlacklistCategoryMenu() {
@@ -523,6 +577,8 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
             centerAction = (title, isAccent)
         }
         
+        self.updateDownloadSpeedMonitoring()
+
         var displayHelp = false
         
         if let peer = interfaceState.renderedPeer?.peer as? TelegramChannel {
@@ -557,10 +613,16 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
         
         var centerPanelItem: GlassControlPanelComponent.Item?
         if let centerAction {
+            let content: GlassControlGroupComponent.Item.Content
+            if self.action == .muteNotifications || self.action == .unmuteNotifications {
+                content = .customIcon(id: "downloadSpeedTitle", component: AnyComponent(DownloadSpeedTitleComponent(title: centerAction.title, speed: self.downloadSpeedText, color: interfaceState.theme.chat.inputPanel.panelControlColor)), insets: UIEdgeInsets(top: 0.0, left: 10.0, bottom: 0.0, right: 10.0))
+            } else {
+                content = .text(centerAction.title)
+            }
             centerPanelItem = GlassControlPanelComponent.Item(
                 items: [GlassControlGroupComponent.Item(
                     id: 0,
-                    content: .text(centerAction.title),
+                    content: content,
                     action: { [weak self] in
                         self?.buttonPressed()
                     }
@@ -615,6 +677,10 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
             }
             transition.updateFrame(view: self.panelContainer, frame: panelFrame)
             transition.updateFrame(view: panelView, frame: CGRect(origin: CGPoint(), size: panelFrame.size))
+            if let itemView = (panelView as? GlassControlPanelComponent.View)?.centerItemView?.itemView(id: AnyHashable(0)), let centerAction {
+                itemView.accessibilityLabel = centerAction.title
+                itemView.accessibilityValue = (self.action == .muteNotifications || self.action == .unmuteNotifications) ? "下载速度 " + self.downloadSpeedText : nil
+            }
         }
         
         return panelHeight
