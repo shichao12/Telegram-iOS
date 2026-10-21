@@ -67,8 +67,8 @@ small text below the mute/unmute title. Refresh about once per second while the
 panel is on screen and the app is active; idle reads `↓ 0 KB/s`.
 
 ```sh
-xcrun swiftc submodules/TelegramUI/Components/Chat/ChatChannelSubscriberInputPanelNode/Sources/DownloadSpeedEstimator.swift \
-  submodules/TelegramUI/Components/Chat/ChatChannelSubscriberInputPanelNode/Tests/DownloadSpeedEstimatorTests.swift \
+xcrun swiftc submodules/MediaDownloadSpeed/Sources/DownloadSpeedEstimator.swift \
+  submodules/MediaDownloadSpeed/Tests/DownloadSpeedEstimatorTests.swift \
   -o /tmp/tg-download-speed-tests
 /tmp/tg-download-speed-tests
 ```
@@ -76,3 +76,8 @@ xcrun swiftc submodules/TelegramUI/Components/Chat/ChatChannelSubscriberInputPan
 On a signed device, verify: speed changes during media downloads and returns to zero
 when idle; mute/unmute still works; title and speed fit in portrait/landscape and both
 themes; returning from the background starts with a fresh speed baseline.
+
+
+Player header: show the same speed beside the date below the channel/author name.
+Reserve room for speed on narrow screens. Hide it with the player toolbar; stop sampling
+when the player is off screen, displaying a photo, or the app is inactive.

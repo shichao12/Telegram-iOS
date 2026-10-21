@@ -714,6 +714,13 @@ public class GalleryController: ViewController, StandalonePresentableController,
     var rewatchReturnAction: (() -> Void)?
     var rewatchPictureInPictureAction: (() -> Void)?
     private var rewatchBackgroundObserver: NSObjectProtocol?
+    private var downloadSpeedPageVisible = false
+    private var downloadSpeedControlsVisible = true
+
+    private func updateDownloadSpeedVisibility() {
+        guard self.isNodeLoaded else { return }
+        self.titleView.setDownloadSpeedEnabled(self.downloadSpeedPageVisible && self.downloadSpeedControlsVisible && self.galleryNode.pager.centralItemNode() is UniversalVideoGalleryItemNode)
+    }
 
     @objc func returnFromRewatch() { self.dismiss(forceAway: true) }
 
@@ -1143,6 +1150,7 @@ public class GalleryController: ViewController, StandalonePresentableController,
         
         self.centralItemAttributesDisposable.add(self.centralItemTitleContent.get().start(next: { [weak self] titleContent in
             self?.titleView.setContent(content: titleContent)
+            self?.updateDownloadSpeedVisibility()
         }))
         
         self.centralItemAttributesDisposable.add(combineLatest(self.centralItemRightBarButtonItem.get(), self.centralItemRightBarButtonItems.get()).start(next: { [weak self] rightBarButtonItem, rightBarButtonItems in
@@ -1686,6 +1694,8 @@ public class GalleryController: ViewController, StandalonePresentableController,
                 return
             }
             self.prefersOnScreenNavigationHidden = !visible
+            self.downloadSpeedControlsVisible = visible
+            self.updateDownloadSpeedVisibility()
             
             self.galleryNode.pager.forEachItemNode { itemNode in
                 itemNode.controlsVisibilityUpdated(isVisible: visible, animated: true)
@@ -1757,6 +1767,7 @@ public class GalleryController: ViewController, StandalonePresentableController,
         
         self.galleryNode.pager.centralItemIndexUpdated = { [weak self] index in
             if let strongSelf = self {
+                strongSelf.updateDownloadSpeedVisibility()
                 var hiddenItem: (MessageId, Media)?
                 if let index = index {
                     let entry = strongSelf.entries[index]
@@ -1932,6 +1943,8 @@ public class GalleryController: ViewController, StandalonePresentableController,
     
     override public func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        self.downloadSpeedPageVisible = true
+        self.updateDownloadSpeedVisibility()
         
         if let hiddenMediaManagerIndex = self.hiddenMediaManagerIndex {
             self.hiddenMediaManagerIndex = nil
@@ -2011,6 +2024,8 @@ public class GalleryController: ViewController, StandalonePresentableController,
     
     override public func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        self.downloadSpeedPageVisible = false
+        self.updateDownloadSpeedVisibility()
         
         (self.galleryNode.pager.centralItemNode() as? UniversalVideoGalleryItemNode)?.flushRewatchProgress()
         self.accountInUseDisposable.set(nil)

@@ -1,4 +1,6 @@
 import Foundation
+import SwiftSignalKit
+import MediaDownloadSpeed
 import UIKit
 import AsyncDisplayKit
 import Display
@@ -65,6 +67,13 @@ public final class GalleryTitleView: UIView, NavigationBarTitleView {
     private let backgroundView: GlassBackgroundView
     private let authorNameNode: ASTextNode
     private let dateNode: ASTextNode
+    private let downloadSpeedNode: ASTextNode
+    private let downloadSpeedDisposable = MetaDisposable()
+    private var downloadSpeedEnabled = false
+    private var downloadSpeedMonitoring = false
+    private var downloadSpeedText = "↓ 0 KB/s"
+    private var applicationActive = UIApplication.shared.applicationState == .active
+    private var applicationObservers: [NSObjectProtocol] = []
     
     private let titleBackgroundContainer: GlassBackgroundContainerView
     private let titleBackground: GlassBackgroundView
@@ -94,6 +103,11 @@ public final class GalleryTitleView: UIView, NavigationBarTitleView {
         self.dateNode.isUserInteractionEnabled = false
         self.dateNode.displaysAsynchronously = false
         self.dateNode.maximumNumberOfLines = 1
+
+        self.downloadSpeedNode = ASTextNode()
+        self.downloadSpeedNode.isUserInteractionEnabled = false
+        self.downloadSpeedNode.displaysAsynchronously = false
+        self.downloadSpeedNode.maximumNumberOfLines = 1
         
         self.titleBackgroundContainer = GlassBackgroundContainerView()
         self.titleBackground = GlassBackgroundView()
@@ -106,6 +120,15 @@ public final class GalleryTitleView: UIView, NavigationBarTitleView {
         
         self.backgroundView.contentView.addSubview(self.authorNameNode.view)
         self.backgroundView.contentView.addSubview(self.dateNode.view)
+        self.backgroundView.contentView.addSubview(self.downloadSpeedNode.view)
+        self.applicationObservers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.applicationActive = true
+            self?.updateDownloadSpeedMonitoring()
+        })
+        self.applicationObservers.append(NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.applicationActive = false
+            self?.updateDownloadSpeedMonitoring()
+        })
         
         self.backgroundContainer.isHidden = true
         
@@ -121,6 +144,34 @@ public final class GalleryTitleView: UIView, NavigationBarTitleView {
     
     deinit {
         self.interactionTimer?.invalidate()
+        self.downloadSpeedDisposable.dispose()
+        for observer in self.applicationObservers { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    override public func didMoveToWindow() {
+        super.didMoveToWindow()
+        self.updateDownloadSpeedMonitoring()
+    }
+
+    func setDownloadSpeedEnabled(_ enabled: Bool) {
+        guard self.downloadSpeedEnabled != enabled else { return }
+        self.downloadSpeedEnabled = enabled
+        self.downloadSpeedText = "↓ 0 KB/s"
+        self.setContent(content: self.content)
+        self.updateDownloadSpeedMonitoring()
+    }
+
+    private func updateDownloadSpeedMonitoring() {
+        let shouldMonitor = self.downloadSpeedEnabled && self.window != nil && self.applicationActive
+        guard shouldMonitor != self.downloadSpeedMonitoring else { return }
+        self.downloadSpeedMonitoring = shouldMonitor
+        self.downloadSpeedDisposable.set(nil)
+        guard shouldMonitor else { return }
+        self.downloadSpeedDisposable.set(mediaDownloadSpeed(account: self.context.account).start(next: { [weak self] text in
+            guard let self, self.downloadSpeedMonitoring, self.downloadSpeedText != text else { return }
+            self.downloadSpeedText = text
+            self.setContent(content: self.content)
+        }))
     }
     
     @objc private func onTapGesture(_ recognizer: UITapGestureRecognizer) {
@@ -160,6 +211,12 @@ public final class GalleryTitleView: UIView, NavigationBarTitleView {
             self.dateNode.attributedText = nil
         }
 
+        if self.downloadSpeedEnabled, let dateText, !dateText.isEmpty {
+            self.downloadSpeedNode.attributedText = NSAttributedString(string: "· " + self.downloadSpeedText, font: UIFont.monospacedDigitSystemFont(ofSize: 11.0, weight: .regular), textColor: UIColor(white: 1.0, alpha: 0.65))
+        } else {
+            self.downloadSpeedNode.attributedText = nil
+        }
+
         self.backgroundContainer.isHidden = (authorNameText?.isEmpty ?? true) && (dateText?.isEmpty ?? true)
 
         self.titleString = content?.title
@@ -175,27 +232,36 @@ public final class GalleryTitleView: UIView, NavigationBarTitleView {
         let leftInset: CGFloat = 8.0 + 14.0
         let rightInset: CGFloat = 8.0 + 14.0
         
+        let displaysSpeed = self.downloadSpeedNode.attributedText != nil
+        let maxBackgroundWidth = max(1.0, size.width - 16.0)
+        let contentWidth = max(1.0, maxBackgroundWidth - 28.0)
+        let speedWidth: CGFloat = displaysSpeed ? min(85.0, contentWidth * 0.48) : 0.0
+        let metadataSpacing: CGFloat = displaysSpeed ? 4.0 : 0.0
         let authorNameSize = self.authorNameNode.measure(CGSize(width: max(1.0, size.width - 8.0 * 2.0 - leftInset - rightInset), height: CGFloat.greatestFiniteMagnitude))
-        let dateSize = self.dateNode.measure(CGSize(width: max(1.0, size.width - 8.0 * 2.0), height: CGFloat.greatestFiniteMagnitude))
-        
-        var backgroundSize = CGSize(width: 0.0, height: 44.0)
-        
-        if authorNameSize.height.isZero {
-            backgroundSize.width = dateSize.width
-        } else {
-            backgroundSize.width = max(authorNameSize.width, dateSize.width)
+        let dateSize = self.dateNode.measure(CGSize(width: displaysSpeed ? max(1.0, contentWidth - speedWidth - metadataSpacing) : max(1.0, size.width - 8.0 * 2.0), height: CGFloat.greatestFiniteMagnitude))
+        let speedSize = self.downloadSpeedNode.measure(CGSize(width: max(1.0, speedWidth), height: CGFloat.greatestFiniteMagnitude))
+        let metadataWidth = dateSize.width + metadataSpacing + speedWidth
+        let metadataHeight = max(dateSize.height, speedSize.height)
+
+        var backgroundSize = CGSize(width: max(authorNameSize.width, metadataWidth), height: 44.0)
+        backgroundSize.width = max(150.0, backgroundSize.width) + 28.0
+        if displaysSpeed {
+            backgroundSize.width = min(maxBackgroundWidth, backgroundSize.width)
         }
-        backgroundSize.width = max(150.0, backgroundSize.width)
-        backgroundSize.width += 14.0 * 2.0
-        
+
+        let metadataY: CGFloat
         if authorNameSize.height.isZero {
-            self.dateNode.frame = CGRect(origin: CGPoint(x: floor((backgroundSize.width - dateSize.width) / 2.0), y: floor((backgroundSize.height - dateSize.height) / 2.0)), size: dateSize)
+            metadataY = floor((backgroundSize.height - metadataHeight) / 2.0)
         } else {
             let labelsSpacing: CGFloat = 2.0
-            self.authorNameNode.frame = CGRect(origin: CGPoint(x: floor((backgroundSize.width - authorNameSize.width) / 2.0), y: floor((backgroundSize.height - dateSize.height - authorNameSize.height - labelsSpacing) / 2.0)), size: authorNameSize)
-            self.dateNode.frame = CGRect(origin: CGPoint(x: floor((backgroundSize.width - dateSize.width) / 2.0), y: floor((backgroundSize.height - dateSize.height - authorNameSize.height - labelsSpacing) / 2.0) + authorNameSize.height + labelsSpacing), size: dateSize)
+            let authorY = floor((backgroundSize.height - metadataHeight - authorNameSize.height - labelsSpacing) / 2.0)
+            self.authorNameNode.frame = CGRect(origin: CGPoint(x: floor((backgroundSize.width - authorNameSize.width) / 2.0), y: authorY), size: authorNameSize)
+            metadataY = authorY + authorNameSize.height + labelsSpacing
         }
-        
+        let metadataX = floor((backgroundSize.width - metadataWidth) / 2.0)
+        self.dateNode.frame = CGRect(origin: CGPoint(x: metadataX, y: metadataY + floor((metadataHeight - dateSize.height) / 2.0)), size: dateSize)
+        self.downloadSpeedNode.frame = CGRect(x: metadataX + dateSize.width + metadataSpacing, y: metadataY + floor((metadataHeight - speedSize.height) / 2.0), width: speedWidth, height: speedSize.height)
+
         let backgroundFrame = CGRect(origin: CGPoint(x: floor((size.width - backgroundSize.width) * 0.5), y: floor((size.height - backgroundSize.height) * 0.5)), size: backgroundSize)
         
         self.backgroundContainer.update(size: backgroundFrame.size, isDark: true, transition: ComponentTransition(transition))
