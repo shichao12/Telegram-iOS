@@ -43,6 +43,31 @@ struct VideoRewatchStoreTests {
         let duplicated = directory.appendingPathComponent("duplicates.json")
         try JSONEncoder().encode([second, second]).write(to: duplicated)
         precondition(VideoRewatchStore(url: duplicated).records.count == 1)
-        print("VideoRewatchStore: all persistence, identity, progress, completion and failure checks passed")
+        // Paused or unchanged playback must not atomically rewrite the file again.
+        let originalInode = try FileManager.default.attributesOfItem(atPath: url.path)[.systemFileNumber] as! NSNumber
+        for _ in 0..<1000 {
+            reloaded.update(key: second.key, position: second.position, duration: second.duration)
+            precondition(reloaded.flush())
+        }
+        let unchangedInode = try FileManager.default.attributesOfItem(atPath: url.path)[.systemFileNumber] as! NSNumber
+        precondition(originalInode == unchangedInode, "Unchanged progress must perform no disk writes")
+
+        let asyncURL = directory.appendingPathComponent("async.json")
+        let asyncStore = VideoRewatchStore(url: asyncURL, saveDelay: 0.01)
+        precondition(asyncStore.toggle(first))
+        asyncStore.update(key: first.key, position: 22, duration: 90)
+        let deadline = Date().addingTimeInterval(2.0)
+        while VideoRewatchStore(url: asyncURL).record(key: first.key)?.position != 22 && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        precondition(VideoRewatchStore(url: asyncURL).record(key: first.key)?.position == 22, "Deferred writes must save progress")
+        // A synchronous final position must win over an older queued snapshot.
+        asyncStore.update(key: first.key, position: 35, duration: 90)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        asyncStore.update(key: first.key, position: 48, duration: 90)
+        precondition(asyncStore.flush())
+        RunLoop.current.run(until: Date().addingTimeInterval(0.04))
+        precondition(VideoRewatchStore(url: asyncURL).record(key: first.key)?.position == 48)
+        print("VideoRewatchStore: persistence, identity, progress, completion, failures, write deduplication and queued-write ordering passed")
     }
 }

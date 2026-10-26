@@ -20,6 +20,10 @@ public struct VideoRewatchRecord: Codable, Equatable {
     public var lastViewed: Double
 
     public var key: String {
+        return Self.makeKey(peerId: self.peerId, namespace: self.namespace, messageId: self.messageId, mediaNamespace: self.mediaNamespace, mediaId: self.mediaId)
+    }
+
+    static func makeKey(peerId: Int64, namespace: Int32, messageId: Int32, mediaNamespace: Int32, mediaId: Int64) -> String {
         return "\(peerId):\(namespace):\(messageId):\(mediaNamespace):\(mediaId)"
     }
 
@@ -32,13 +36,31 @@ public final class VideoRewatchStore {
     public static let changed = Notification.Name("VideoRewatchStoreChanged")
     public private(set) var records: [VideoRewatchRecord]
     private let url: URL
+    private let saveDelay: TimeInterval
+    private let writeQueue = DispatchQueue(label: "VideoRewatchStore.write", qos: .utility)
+    private var recordIndices: [String: Int] = [:]
+    private var revision: Int64 = 0
+    private var savedRevision: Int64 = 0
+    private var writeInFlight = false
     private var pendingWrite: DispatchWorkItem?
 
-    public init(url: URL) {
+    public convenience init(url: URL) {
+        self.init(url: url, saveDelay: 10.0)
+    }
+
+    init(url: URL, saveDelay: TimeInterval) {
         self.url = url
+        self.saveDelay = saveDelay
         self.records = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode([VideoRewatchRecord].self, from: $0) } ?? []
         var keys = Set<String>()
         self.records = self.records.filter { keys.insert($0.key).inserted }
+        self.rebuildIndices()
+    }
+
+    deinit { self.pendingWrite?.cancel() }
+
+    private func rebuildIndices() {
+        self.recordIndices = Dictionary(uniqueKeysWithValues: self.records.enumerated().map { ($0.element.key, $0.offset) })
     }
 
     public var sortedRecords: [VideoRewatchRecord] {
@@ -46,18 +68,24 @@ public final class VideoRewatchStore {
     }
 
     public func record(key: String) -> VideoRewatchRecord? {
-        return self.records.first(where: { $0.key == key })
+        return self.recordIndices[key].map { self.records[$0] }
     }
 
     @discardableResult public func toggle(_ record: VideoRewatchRecord) -> Bool {
         let previous = self.records
-        if self.record(key: record.key) != nil {
-            self.records.removeAll(where: { $0.key == record.key })
+        let previousRevision = self.revision
+        if let index = self.recordIndices[record.key] {
+            self.records.remove(at: index)
         } else {
             self.records.append(record)
         }
+        self.rebuildIndices()
+        self.revision += 1
         guard self.flush() else {
             self.records = previous
+            self.revision = previousRevision
+            self.rebuildIndices()
+            self.scheduleWrite()
             return false
         }
         NotificationCenter.default.post(name: Self.changed, object: self)
@@ -71,36 +99,66 @@ public final class VideoRewatchStore {
 
     public func update(key: String, position: Double, duration: Double, completed: Bool = false, touch: Bool = false) {
         guard position.isFinite, duration.isFinite, duration > 0.0,
-              let index = self.records.firstIndex(where: { $0.key == key }) else { return }
-        self.records[index].position = max(0.0, min(position, duration))
-        self.records[index].duration = duration
-        // End-of-playback seeks back to zero; keep the completed badge until playback advances.
+              let index = self.recordIndices[key] else { return }
+        var updated = self.records[index]
+        updated.position = max(0.0, min(position, duration))
+        updated.duration = duration
         if completed {
-            self.records[index].completed = true
+            updated.completed = true
         } else if position > 0.5 && position < duration - 0.5 {
-            self.records[index].completed = false
+            updated.completed = false
         }
-        if touch { self.records[index].lastViewed = Date().timeIntervalSince1970 }
-        if self.pendingWrite == nil {
-            let work = DispatchWorkItem { [weak self] in
-                self?.pendingWrite = nil
-                self?.flush()
+        if touch { updated.lastViewed = Date().timeIntervalSince1970 }
+        guard updated != self.records[index] else { return }
+        self.records[index] = updated
+        self.revision += 1
+        self.scheduleWrite()
+    }
+
+    private func scheduleWrite() {
+        guard self.revision != self.savedRevision, self.pendingWrite == nil, !self.writeInFlight else { return }
+        let work = DispatchWorkItem { [weak self] in self?.beginBackgroundWrite() }
+        self.pendingWrite = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + self.saveDelay, execute: work)
+    }
+
+    private func beginBackgroundWrite() {
+        self.pendingWrite = nil
+        guard self.revision != self.savedRevision, !self.writeInFlight else { return }
+        let snapshot = self.records
+        let revision = self.revision
+        let url = self.url
+        self.writeInFlight = true
+        self.writeQueue.async { [weak self] in
+            let success = Self.write(snapshot, to: url)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.writeInFlight = false
+                if success { self.savedRevision = max(self.savedRevision, revision) }
+                self.scheduleWrite()
             }
-            self.pendingWrite = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
         }
     }
 
-    @discardableResult public func flush() -> Bool {
-        self.pendingWrite?.cancel()
-        self.pendingWrite = nil
+    private static func write(_ records: [VideoRewatchRecord], to url: URL) -> Bool {
         do {
-            try FileManager.default.createDirectory(at: self.url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(self.records)
-            try data.write(to: self.url, options: .atomic)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(records).write(to: url, options: .atomic)
             return true
         } catch {
             return false
         }
+    }
+
+    // Explicit bookmark changes, leaving playback and entering the background still
+    // finish synchronously. The serial queue keeps older snapshots from overwriting them.
+    @discardableResult public func flush() -> Bool {
+        self.pendingWrite?.cancel()
+        self.pendingWrite = nil
+        guard self.revision != self.savedRevision else { return true }
+        let snapshot = self.records
+        let success = self.writeQueue.sync { Self.write(snapshot, to: self.url) }
+        if success { self.savedRevision = self.revision }
+        return success
     }
 }

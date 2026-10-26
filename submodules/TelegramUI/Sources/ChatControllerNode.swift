@@ -1,4 +1,5 @@
 import Foundation
+import ChatChannelSubscriberInputPanelNode
 import UIKit
 import AsyncDisplayKit
 import Postbox
@@ -272,7 +273,16 @@ class ChatControllerNode: ASDisplayNode, ASScrollViewDelegate {
     private var bottomBackgroundEdgeEffectNode: WallpaperEdgeEffectNode?
     
     var updateVideoRewatchLayout: ((ContainedViewLayoutTransition) -> Void)?
-    private(set) var inputPanelNode: ChatInputPanelNode?
+    var downloadSpeedDisplayActive = false {
+        didSet {
+            (self.inputPanelNode as? ChatChannelSubscriberInputPanelNode)?.downloadSpeedDisplayActive = self.downloadSpeedDisplayActive
+        }
+    }
+    private(set) var inputPanelNode: ChatInputPanelNode? {
+        didSet {
+            (self.inputPanelNode as? ChatChannelSubscriberInputPanelNode)?.downloadSpeedDisplayActive = self.downloadSpeedDisplayActive
+        }
+    }
     private weak var currentDismissedInputPanelNode: ChatInputPanelNode?
     private(set) var secondaryInputPanelNode: ChatInputPanelNode?
     private(set) var accessoryPanelNode: AccessoryPanelNode?

@@ -197,8 +197,13 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
     private let actionDisposable = MetaDisposable()
     private let badgeDisposable = MetaDisposable()
     private let downloadSpeedDisposable = MetaDisposable()
-    private var downloadSpeedText = "↓ 0 KB/s"
+    private let downloadSpeedDisplay = DownloadSpeedText()
     private var downloadSpeedMonitoring = false
+    public var downloadSpeedDisplayActive = false {
+        didSet {
+            if oldValue != self.downloadSpeedDisplayActive { self.updateDownloadSpeedMonitoring() }
+        }
+    }
     private var panelInHierarchy = false
     private var applicationActive = UIApplication.shared.applicationState == .active
     private var applicationObservers: [NSObjectProtocol] = []
@@ -244,17 +249,18 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
     }
 
     private func updateDownloadSpeedMonitoring() {
-        let shouldMonitor = self.panelInHierarchy && self.applicationActive && (self.action == .muteNotifications || self.action == .unmuteNotifications)
+        let shouldMonitor = self.downloadSpeedDisplayActive && self.panelInHierarchy && self.applicationActive && (self.action == .muteNotifications || self.action == .unmuteNotifications)
         guard shouldMonitor != self.downloadSpeedMonitoring else { return }
         self.downloadSpeedMonitoring = shouldMonitor
         self.downloadSpeedDisposable.set(nil)
         guard shouldMonitor, let context = self.context else { return }
         self.downloadSpeedDisposable.set(mediaDownloadSpeed(account: context.account).start(next: { [weak self] text in
             guard let self, self.downloadSpeedMonitoring else { return }
-            guard text != self.downloadSpeedText else { return }
-            self.downloadSpeedText = text
-            if let (width, leftInset, rightInset, bottomInset, additionalSideInsets, maxHeight, maxOverlayHeight, isSecondary, metrics, deviceMetrics) = self.layoutData, let interfaceState = self.presentationInterfaceState {
-                let _ = self.updateLayout(width: width, leftInset: leftInset, rightInset: rightInset, bottomInset: bottomInset, additionalSideInsets: additionalSideInsets, maxHeight: maxHeight, maxOverlayHeight: maxOverlayHeight, isSecondary: isSecondary, transition: .immediate, interfaceState: interfaceState, metrics: metrics, deviceMetrics: deviceMetrics, force: true)
+            guard text != self.downloadSpeedDisplay.text else { return }
+            self.downloadSpeedDisplay.update(text)
+            if let panelView = self.panel.view as? GlassControlPanelComponent.View,
+               let itemView = panelView.centerItemView?.itemView(id: AnyHashable(0)) {
+                itemView.accessibilityValue = "下载速度 " + text
             }
         }))
     }
@@ -607,7 +613,7 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
         if let centerAction {
             let content: GlassControlGroupComponent.Item.Content
             if self.action == .muteNotifications || self.action == .unmuteNotifications {
-                content = .customIcon(id: "downloadSpeedTitle", component: AnyComponent(DownloadSpeedTitleComponent(title: centerAction.title, speed: self.downloadSpeedText, color: interfaceState.theme.chat.inputPanel.panelControlColor)), insets: UIEdgeInsets(top: 0.0, left: 10.0, bottom: 0.0, right: 10.0))
+                content = .customIcon(id: "downloadSpeedTitle", component: AnyComponent(DownloadSpeedTitleComponent(title: centerAction.title, speed: self.downloadSpeedDisplay, color: interfaceState.theme.chat.inputPanel.panelControlColor)), insets: UIEdgeInsets(top: 0.0, left: 10.0, bottom: 0.0, right: 10.0))
             } else {
                 content = .text(centerAction.title)
             }
@@ -671,7 +677,7 @@ public final class ChatChannelSubscriberInputPanelNode: ChatInputPanelNode {
             transition.updateFrame(view: panelView, frame: CGRect(origin: CGPoint(), size: panelFrame.size))
             if let itemView = (panelView as? GlassControlPanelComponent.View)?.centerItemView?.itemView(id: AnyHashable(0)), let centerAction {
                 itemView.accessibilityLabel = centerAction.title
-                itemView.accessibilityValue = (self.action == .muteNotifications || self.action == .unmuteNotifications) ? "下载速度 " + self.downloadSpeedText : nil
+                itemView.accessibilityValue = (self.action == .muteNotifications || self.action == .unmuteNotifications) ? "下载速度 " + self.downloadSpeedDisplay.text : nil
             }
         }
         

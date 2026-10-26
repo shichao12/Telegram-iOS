@@ -426,6 +426,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     var canReadHistoryValue = false {
         didSet {
             self.computedCanReadHistoryPromise.set(self.canReadHistoryValue)
+            if self.isNodeLoaded { self.chatDisplayNode.downloadSpeedDisplayActive = self.canReadHistoryValue }
         }
     }
     var canReadHistoryDisposable: Disposable?
@@ -7870,6 +7871,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
         
         self.chatDisplayNode.historyNode.experimentalSnapScrollToItem = false
         self.chatDisplayNode.historyNode.canReadHistory.set(self.computedCanReadHistoryPromise.get())
+        self.chatDisplayNode.downloadSpeedDisplayActive = self.canReadHistoryValue
         self.chatDisplayNode.historyNode.areContentAnimationsEnabled = true
         
         if !self.alwaysShowSearchResultsAsList {
@@ -8295,6 +8297,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     
     override public func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        self.chatDisplayNode.downloadSpeedDisplayActive = false
         
         if #available(iOS 18.0, *) {
         } else {

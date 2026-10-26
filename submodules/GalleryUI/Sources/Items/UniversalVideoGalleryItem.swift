@@ -976,13 +976,22 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
         return max(0.0, min(timestamp, status.duration))
     }
 
-    func rewatchRecord() -> VideoRewatchRecord? {
+    private func rewatchMedia() -> (item: UniversalVideoGalleryItem, message: Message, subject: GalleryMediaSubject?, file: TelegramMediaFile)? {
         guard let item = self.item, !item.isSecret,
               let contentInfo = item.contentInfo, case let .message(message, subject) = contentInfo,
               message.id.peerId.namespace != Namespaces.Peer.SecretChat, !message.containsSecretMedia,
               let file = selectedMediaForMessage(message: message, mediaSubject: subject) as? TelegramMediaFile,
               file.isVideo, !file.isAnimated, !file.isInstantVideo else { return nil }
-        return VideoRewatch.record(message: message, file: file, subject: subject, position: self.playerStatusValue.map(self.rewatchTimestamp) ?? 0.0, duration: self.playerStatusValue?.duration ?? Double(item.content.duration))
+        return (item, message, subject, file)
+    }
+
+    private func rewatchKey(message: Message, file: TelegramMediaFile) -> String {
+        return VideoRewatchRecord.makeKey(peerId: message.id.peerId.toInt64(), namespace: message.id.namespace, messageId: message.id.id, mediaNamespace: file.fileId.namespace, mediaId: file.fileId.id)
+    }
+
+    func rewatchRecord() -> VideoRewatchRecord? {
+        guard let media = self.rewatchMedia() else { return nil }
+        return VideoRewatch.record(message: media.message, file: media.file, subject: media.subject, position: self.playerStatusValue.map(self.rewatchTimestamp) ?? 0.0, duration: self.playerStatusValue?.duration ?? Double(media.item.content.duration))
     }
 
     func suspendForRewatch() {
@@ -1005,17 +1014,20 @@ final class UniversalVideoGalleryItemNode: ZoomableContentGalleryItemNode {
     func flushRewatchProgress() {
         guard let item = self.item else { return }
         if let status = self.playerStatusValue { self.updateRewatchProgress(status: status) }
-        if let record = self.rewatchRecord(), VideoRewatch.store(context: item.context).record(key: record.key) != nil {
-            VideoRewatch.store(context: item.context).flush()
+        let store = VideoRewatch.store(context: item.context)
+        if let media = self.rewatchMedia(), store.record(key: self.rewatchKey(message: media.message, file: media.file)) != nil {
+            store.flush()
         }
     }
 
     private func updateRewatchProgress(status: MediaPlayerStatus, completed: Bool = false) {
         guard self.isCentral == true, !self.rewatchSuspended,
-              let item = self.item, let record = self.rewatchRecord() else { return }
+              let item = self.item else { return }
         let store = VideoRewatch.store(context: item.context)
-        guard store.record(key: record.key) != nil else { return }
-        store.update(key: record.key, position: self.rewatchTimestamp(status), duration: status.duration, completed: completed, touch: !self.rewatchTouched && status.status == .playing)
+        guard !store.records.isEmpty, let media = self.rewatchMedia() else { return }
+        let key = self.rewatchKey(message: media.message, file: media.file)
+        guard store.record(key: key) != nil else { return }
+        store.update(key: key, position: self.rewatchTimestamp(status), duration: status.duration, completed: completed, touch: !self.rewatchTouched && status.status == .playing)
         if status.status == .playing { self.rewatchTouched = true }
     }
 

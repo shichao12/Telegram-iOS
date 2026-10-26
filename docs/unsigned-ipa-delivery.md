@@ -63,7 +63,7 @@ try a missing message; check no overlapping audio and portrait/landscape placeme
 ## Download speed display validation
 
 Added 2026-10-21: show the current account's combined media download speed in
-small text below the mute/unmute title. Refresh about once per second while the
+small text below the mute/unmute title. Refresh about once every two seconds while the
 panel is on screen and the app is active; idle reads `↓ 0 KB/s`.
 
 ```sh
@@ -81,3 +81,18 @@ themes; returning from the background starts with a fresh speed baseline.
 Player header: show the same speed beside the date below the channel/author name.
 Reserve room for speed on narrow screens. Hide it with the player toolbar; stop sampling
 when the player is off screen, displaying a photo, or the app is inactive.
+
+
+## Playback energy regression checks
+
+```sh
+xcrun swiftc submodules/MediaDownloadSpeed/Sources/SharedDownloadSpeedSource.swift \
+  submodules/MediaDownloadSpeed/Tests/SharedDownloadSpeedSourceTests.swift \
+  -o /tmp/tg-shared-speed-tests
+/tmp/tg-shared-speed-tests
+```
+
+The speed displays share one sampler per account and update only the small labels.
+Rewatch periodic writes run on a serial background queue about every ten seconds;
+explicit saves on bookmark changes, leaving playback and entering the background remain.
+See `docs/playback-energy-review.md` for findings and the limits of source-only diagnosis.

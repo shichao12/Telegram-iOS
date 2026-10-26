@@ -1,19 +1,35 @@
 import UIKit
 import ComponentFlow
 
+final class DownloadSpeedText {
+    private(set) var text = "↓ 0 KB/s"
+    private weak var label: UILabel?
+
+    func attach(to label: UILabel) {
+        self.label = label
+        label.text = self.text
+    }
+
+    func update(_ text: String) {
+        guard self.text != text else { return }
+        self.text = text
+        self.label?.text = text
+    }
+}
+
 final class DownloadSpeedTitleComponent: Component {
     let title: String
-    let speed: String
+    let speed: DownloadSpeedText
     let color: UIColor
 
-    init(title: String, speed: String, color: UIColor) {
+    init(title: String, speed: DownloadSpeedText, color: UIColor) {
         self.title = title
         self.speed = speed
         self.color = color
     }
 
     static func ==(lhs: DownloadSpeedTitleComponent, rhs: DownloadSpeedTitleComponent) -> Bool {
-        return lhs.title == rhs.title && lhs.speed == rhs.speed && lhs.color == rhs.color
+        return lhs.title == rhs.title && lhs.speed === rhs.speed && lhs.color == rhs.color
     }
 
     final class View: UIView {
@@ -39,7 +55,7 @@ final class DownloadSpeedTitleComponent: Component {
     func update(view: View, availableSize: CGSize, state: EmptyComponentState, environment: Environment<Empty>, transition: ComponentTransition) -> CGSize {
         view.titleLabel.text = self.title
         view.titleLabel.textColor = self.color
-        view.speedLabel.text = self.speed
+        self.speed.attach(to: view.speedLabel)
         view.speedLabel.textColor = self.color.withAlphaComponent(0.65)
         // Reserve the speed row's width so changing digits never move the button.
         let width = min(availableSize.width, max(90.0, view.titleLabel.sizeThatFits(availableSize).width))
